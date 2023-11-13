@@ -1,0 +1,133 @@
+//--------------------------------------------------------------
+
+
+class FloatLayer extends DialogLayer {
+	var direction = "auto";		//默认显示方向	auto/up/down/left/right
+	var horAlign = "center";	//	水平对齐方式	left/center/right
+	var vertAlign = "center";	//	垂直对齐方式	top/center/bottom
+	var moveDis=8;	//移动距离
+	var hasAction = true;	//是否具有演出动画
+	var actionTime = SystemConfig.UiAnimeTime;	//动画时间
+	var _targetLayer;
+	function FloatLayer(win=kag,par=kag.primaryLayer,name,elm = %[]){
+		super.DialogLayer(win, par, name);
+		uiload(this,elm) if(!isBlank(elm.storage));
+		hitType = htMask;
+		hitThreshold = 256;	// 禁止鼠标事件
+		absolute = SystemConfig.FloatLayerAbsolute;
+		win.add(this);
+	}
+	function finalize(){
+		delAction("float") if(isvalid this);
+		super.finalize();
+	}
+	function getShowAction(elm){
+		var time = isBlank(elm.time)?actionTime: elm.time;
+		var dir = elm.direction;
+		var value ="@";
+		if(dir=="right" || dir == "down")
+			value += "+";
+		else value += "-";
+		var res = [ %[ opacity:%[ handler:MoveAction, value:255, time:time ]] ];
+		if(dir=="up" || dir == "down")
+			res[0].top = %[ handler:MoveAction, value:value + moveDis, time:time ];
+		else res[0].left = %[ handler:MoveAction, value:value + moveDis, time:time ];
+		return res;
+	}
+	function getHideAction(){
+		return [ %[ opacity:%[ handler:MoveAction, start:(opacity=255), value:0, time:actionTime ]],
+			%[visible:%[handler:MoveAction, value:0, time:0]] ];
+	}
+
+	function getHorPos(lay){
+		switch(horAlign){
+			case "center": return lay.getParentLeft(parent) + (lay.width - width)/2;
+			case "left": return lay.getParentLeft(parent) - width;
+			case "right": return lay.getParentLeft(parent) + lay.width;
+			default:throw new Exception("the align is not correct!");
+		}
+	}
+	function getVertPos(lay){
+		switch(vertAlign){
+			case "center": return lay.getParentTop(parent) + (lay.height - height)/2;
+			case "top": return lay.getParentTop(parent) - height;
+			case "bottom": return lay.getParentTop(parent) + lay.height;
+			default:throw new Exception("the align is not correct!");
+		}
+	} 
+	/** 
+	 * @description:  	
+	 * @param layer:	显示的相对的层
+	 * @param elm:	显示的参数
+	 * @return:	
+	 */
+	function show(layer, elm=%[]) {
+		if (!isvalid this || isBlank(layer)) return;
+		if(!isBlank(elm.parent))parent = elm.parent;
+		if(_targetLayer !== layer){
+			if(!isBlank(_targetLayer)){
+				_targetLayer.finalize = _targetLayer._orifinalize;
+			}
+			_targetLayer = layer;
+			_targetLayer._orifinalize = _targetLayer.finalize;
+			_targetLayer.finalize =  function(){
+				_targetLayer._orifinalize(); 
+				this.hide();
+			} incontextof this;
+		}
+		delAction("float");
+		var dir = isBlank(elm.direction)?direction:elm.direction;
+		if(dir == "auto"){
+			if(width + layer.width + layer.getParentLeft(parent) + moveDis< window.width) dir ="right";
+			else if(height + layer.height + layer.getParentTop(parent) + moveDis  < window.height) dir ="down";
+			else if(layer.getParentLeft(parent) - width - moveDis > 0) dir ="left";
+			else if(layer.getParentTop(parent) - height - moveDis > 0) dir ="up";
+			else dir ="right";
+		}
+		switch(dir){
+			case "left":
+				left = layer.getParentLeft(parent) - width - (hasAction?0:moveDis);
+				top = getVertPos(layer);
+				break;
+			case "right":
+				left = layer.getParentLeft(parent) + layer.width + (hasAction?0:moveDis);
+				top = getVertPos(layer);
+				break;
+			case "up":
+				top = layer.getParentTop(parent) - height -  (hasAction?0:moveDis);
+				left = getHorPos(layer);
+				break;
+			case "down":
+				top = layer.getParentTop(parent) + layer.height + (hasAction?0:moveDis);
+				left = getHorPos(layer);
+				break;
+			default: throw new Exception("the direction is not correct!");
+		}
+		this.visible = true;
+		if(hasAction)
+			addAction("float",true,getShowAction(elm));
+	}
+	function hide() {
+		if (!isvalid this) return;
+		if(hasAction){
+			delAction("float");
+			addAction("float", true,getHideAction());
+			var complete = function{ visible=false;} incontextof this;
+			setActionComplete("float",complete);
+		}
+		else visible =false;
+	}
+}
+
+function createFloatLayer(name,storgae) {
+	if (isBlank(kag.floatLayer))
+		   kag.floatLayer = new FloatLayer(kag,,name,%[storgae:storgae,transparent:true, visible:false, color:0]);
+	return kag.floatLayer;
+}
+function showHideFloatLayer(vis,elm) {
+	if (vis && createFloatLayer()) {
+		kag.floatLayer.show(elm);
+	} else if (!vis && !isBlank(kag,"floatLayer")) {
+		kag.floatLayer.hide(vis);
+	}
+}

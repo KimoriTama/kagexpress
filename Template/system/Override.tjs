@@ -1,0 +1,212 @@
+// ssShift ssCtrl ssAlt 合成済み値
+global.ssShiftCtrlAlt       = ssShift | ssCtrl | ssAlt;
+global.ssShiftCtrlAltRepeat = global.ssShiftCtrlAlt | ssRepeat; // 上記にリピートを追加
+var afterInitCallback = [], kagHookEntries = [];
+// 単純なコールバックを登録		注册简单回调
+function addAfterInitCallback(func, context = global) {
+	afterInitCallback.add(%[mode:"callback", callback:func, context:context]);
+}
+// KAGのハンドラを登録する		注册KAG处理程序，会在afterinit回调时 加入kag的处理器中
+function addKagHandler(handle, func, context) {
+	afterInitCallback.add(%[mode:"handler", handle:handle, func:func, context:context]);
+}
+// kag.addHookを登録する	注册kag.addHook
+function addKagHookCallback(handle, func, context) {
+	kagHookEntries.add(%[ handle:handle, func:func, context:context]);
+}
+// kagのフックを登録する		注册kag的钩子	此方法在构造kag时会在其上下文中调用	
+function KAGWindow_config_override() {
+	for (var i = 0, cnt = kagHookEntries.count; i < cnt; i++)
+		with (kagHookEntries[i]) addHook(.handle, (.func incontextof .context));
+	callHook("onKAGSetupConfig", this);
+	delete global.kagHookEntries;
+	global.addKagHookCallback = function {
+		Debug.notice("addKagHookCallback(s) has bennd expired .");
+	} incontextof global;
+}
+
+
+/** 
+ * @description: 回调调用,kag初始化完成后调用此方法
+ * callback类型会在afterinit处调用，handler会加到kag的指令解析器上
+ * @return 
+ */
+function callAfterInit() {	
+	for (var i = 0, cnt = afterInitCallback.count; i < cnt; i++) {
+		with (afterInitCallback[i]) {
+			switch (.mode) {
+			case "callback": (.callback incontextof (isBlank(.context)?kag:.context))(); break;
+			case "handler":
+				var func = (.func incontextof (isBlank(.context)?kag:.context));
+				kag.tagHandlers[.handle] = func;
+				break;
+			}
+		}
+	}
+	delete global.afterInitCallback;
+	global.addKagHandler = global.addAfterInitCallback = function {
+		Debug.notice("AfterInitCallback(s) has bennd expired .");
+	} incontextof global;
+}
+
+addAfterInitCallback(function() {
+	with (kag) {
+		/*
+		// 未読スキップチェック		未读跳过检查
+		setAllSkip();
+
+		// セーブ・ロード機能制限		存储加载限制
+		.origCanStore   = .canStore;
+		.origCanRestore = .canRestore;
+		.canStore   = function() { return origCanStore()   && !inSystemMenu(this); } incontextof kag;
+		.canRestore = function() { return origCanRestore() && !inSystemMenu(this); } incontextof kag;
+
+		// 終了後サウンド再生処理		结束后声音再现处理
+		// サウンドがなりおわるまで終了遅延させる		延迟到声音响起为止
+		.onCloseYes = function() {
+			callHook("onCloseYes");
+			if (seenable && sevolume > 0) {
+				askOnClose = false; // 再度聞いてこないようにする
+				process("end.ks");
+			} else {
+				shutdown();
+			}
+		} incontextof kag;
+
+
+		// 画面モード変更フック		画面模式变更挂钩
+		.addHook("onDisplayChangedHook", function{systemUpdate("windowSize");});
+
+		// リサイズフック処理を登録		注册窗口大小变更挂钩
+		.addHook("onWindowResizeHook", function{systemUpdate("windowSize");});  
+
+		// ロード時処理
+		.addHook("onBeforeRestoreFlags", global.terminator.invoke);
+
+		// システムセーブエラー時		系统保存错误时
+		.addHook("onSaveSystemVariablesFailed", function {
+			try { return loadExMenuInterface() ? global.onSaveSystemVariablesFailed(...) : void; } catch {}
+		} incontextof global);
+
+		// フォントフェイス変更		字体更改
+		.addHook("onSetMessageLayerUserFont", function { try { systemUpdate("fontSelect"); } catch {} } incontextof global);
+
+		// 終了確認時にunminimize
+		.addHook("onCloseQuery", function {
+			try {
+				if (isvalid this && currentDialog === void &&
+					_minimized && typeof this.showRestore == "Object" &&
+					!SystemConfig.noRestoreMinizeOnClose)
+				{
+					showRestore();
+				}
+			} catch {}
+		} incontextof kag);
+
+		// jumpタグに警告
+		.addHook("onConductorJump", function (elm) {
+			if (!usingExtraConductor) {
+				if (inGameState(this) && !elm.ignorewarn) {
+					if (SystemConfig.enableJumpTagHack) { // 強制でjumpをnext相当の機能に置き換える
+						tagHandlers.next(elm);
+						return true;
+					}
+					errorCmd("既読情報を正しく保存するためにjumpではなくnextタグを使用してください");
+				}
+				if (typeof this.skipToLineStop != "undefined" &&
+					   this.skipToLineStop !== void) return true; // デバッグスキップ中はjumpを無効
+			}
+		} incontextof kag);
+
+@if (!PACKED)
+		// アイコン設定
+		try {
+			if (typeof SystemConfig.IconFile == "String" && SystemConfig.IconFile != "" &&
+				Storages.isExistentStorage(System.exePath+SystemConfig.IconFile) && typeof .setWindowIcon == "Object") {
+				var file = System.exePath+SystemConfig.IconFile;
+				.setWindowIcon(file, true) if !(typeof   Storages.getMD5HashString == "Object" ); 
+			}
+		} catch {}
+@endif
+
+		// デバッグ時のみ有効		仅在调试期间有效
+		if (!debugEnabled) return;
+       
+        // ALT+DEL重新启动 暂停事件
+ 		if (kag.exEventEnabled) {
+            var msg = .WM_SYSKEYDOWN = global.Window.getNotificationNum("SYSKEYDOWN");
+            .setMessageHook(true, msg);
+            .addHook("onWindowsMessageHook", function (msg, wp, lp) {
+                if (msg == WM_SYSKEYDOWN && wp == VK_DELETE) {
+                    System.eventDisabled = false;
+                    runOnceDelayedTrigger(function {
+                        if (isvalid kag) systemReboot();
+                    });
+                    return true;
+                }
+            } incontextof kag);
+        }
+
+        // デバッグシナリオ開始でセーブ無効解除
+        SystemHook.add("execdialog.start", function { tempDisableStore(%[]); try { tagHandlers.syscover(%[ visible:false ]); } catch {} } incontextof kag);
+        // 自動ログオープン
+        .addHook("onErrorLineHook", function(target, msg, filename, line) {
+            entryErrorLogWithTimeStamp(msg, filename, line);
+        } incontextof kag);
+
+        // 自動ログ移動
+        .addHook("onWindowResizeHook", function {
+            if (!isvalid this || !logMode || logPad === void) return;
+            initLogPad(true, true) if (System.getArgument("-autoerrlogmove") != "no");
+        } incontextof kag);
+
+        //autoLabelStore用
+        .addHook("onAutoLabelStoreHook", function (dic) {
+            try { dic.text = historyLayer.currentText; } catch {}
+        } incontextof kag);
+        
+        .addHook("onMoveSizeEndHook", function(win, old) {
+            if (System.getArgument("-consolesyncpos") != "yes") return;
+            var rect = getWindowRect();
+            if (rect === void || old === void || old.window === void) return;
+            var ox, oy;
+            with (old.window) ox = rect.x-.x, oy = rect.y-.y;
+            if (ox != 0 || oy != 0 ) with (Debug.console) {
+                var rect = (typeof .getRect == "Object") ? .getRect() : void;
+                if (rect !== void) .setPos(rect.x+ox, rect.y+oy);
+            }
+        } incontextof kag);
+        // envStateChecker
+        .addHook("onDebugWinVisibleChanged", function (vis) {
+            global.SetDebugEnvStateCheckerVisible(vis) if (hasDebugUtil);
+        } incontextof global);
+        if (._debugwin !== void && ._debugwin.visible && hasDebugUtil) {
+            global.SetDebugEnvStateCheckerVisible(true);
+        }
+        // 保存ラベル有無チェック		保存标签有无检查
+        .stableHandlers.add(function {
+            if (!usingExtraConductor && inGameState(this)) {
+                if (typeof global.world_object == "Object" &&
+                       global.world_object.env.transMode) errorCmd("begintrans/endtrans間でクリック待ちになりました");
+                if (prevSkipMode !== void) {
+                    errorCmd("beginskip/endskip間でクリック待ちになりました");
+                    cancelSkip();
+                }
+                var esn  = Storages.extractStorageName;
+                var last = storeLabelPassedLastStorage;
+                var cur  = ((string)conductor.curStorage).toLowerCase();
+                if (cur != "" && !inSystemMenuStorages[cur] &&
+                    ((last == "") || (esn(last).toLowerCase() != esn(cur)))) {
+                    if (typeof global.checkScenarioLabelOnStable != "Object" ||
+                          !global.checkScenarioLabelOnStable(cur, last)) {
+                        errorCmd("保存可能なラベル指定がないシナリオで停止状態になりました");
+                        storeLabelPassedLastStorage = cur; // 二度目は出さない [XXX]
+                    }
+                }
+            }
+        } incontextof kag);*/
+		
+	}
+}, global);
+
+

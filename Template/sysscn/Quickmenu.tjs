@@ -1,0 +1,404 @@
+//--------------------------------------------------------------
+// クイックメニュー
+// SystemConfig.QuickMenuUIStorage = "quickmenu"
+// SystemConfig.QuickMenuInitialLockState = false
+// SystemConfig.QuickMenuShowInAutoSkip = false  自动快进模式强制显示
+// SystemConfig.QuickMenuOffTimerInterval = 3000
+//SystemConfig.QuickMenuPopWidth
+//SystemConfig.QuickMenuPopHeight
+// todo quickload 的图标显示
+class QuickMenuLayerBase extends DialogLayer {
+	var tip, offtimer;	// 信息提示层，隐藏计时器
+	var btnFadeTime =  300;
+
+	var hookState = %[];
+	//	用于拦截本身方法的处理（想要鼠标移入光标改变，但是enabled=false 就无法触发移入事件的一种处理）
+	function _btnEnabledSet(oriset,val){
+		cursor = val ? window.cursorPointed : crNo;
+		// *oriset = val;  // 这里不再设置本身的enabled 改用父层的控制
+		parent.hookState[this.name] =val;
+	}
+	function _btnEnabledGet(origet){return parent.hookState[this.name];}
+	function _btnOnMouseEnter(ori){
+		ori();
+		parent.onButtonEnter(this.name);
+	}
+	function _btnOnMouseLeave(ori){
+		ori();
+		parent.onButtonLeave(this.name);
+	}
+	function _btnOnKeyDown(ori,*){
+		var isEnterKey = window.getKeyState(VK_RETURN) || window.getKeyState(VK_SPACE);
+		if(!parent.hookState[this.name] && isEnterKey) // 不可用且为enter键则跳过处理
+			return;
+		ori(*);// 其他键 如 tab键 还可以处理
+	}
+	function _btnOnMouseDown(ori,*){
+		if(!parent.hookState[this.name])return;
+		ori(*);
+	}
+	function _btnOnClick(ori,*){
+		if(!parent.hookState[this.name])return;
+		ori(*);
+	}
+	function _btnOnMouseUp(ori,*){
+		if(!parent.hookState[this.name])return;
+		ori(*);
+	}
+
+	function QuickMenuLayerBase(win,parent) {
+		super.DialogLayer(win, parent, "QuickMenu");
+		visible = true;	//永远可见
+		absolute = 2000; //大于文字层1900 的高度
+		hitType = htMask;
+		hitThreshold = 256;	//不接受鼠标点击
+		createOffTimer();
+
+		var storage = SystemConfig.QuickMenuUIStorage;
+		if (storage == "") storage = "quickmenu";
+		var elm = %[ storage:storage , transparent:true, color:0, opacity:0 ];
+		uiload(this,elm);
+		if (canShowHelpTip(true)) {
+			tip = createHelpTipLayer();
+			hideAllTips();
+		}
+		window.addHook("onMouseMove",onScreenMouseMove);
+		window.addHook("onMouseLeave",onScreenMouseLeave);
+		window.addHook("onModeChange",onModeChange);
+		window.addHook("onRestoreSystemState",onRestore);
+	}
+
+	property locked {	// quickmenu的锁定状态		以存档和全局设置为准
+		getter {
+			var r = window.scflags.QuickMenuLocked;
+			if (isBlank(r)) r = !!SystemConfig.QuickMenuInitialLockState;
+			return r;
+		}
+		setter (v) {
+			window.scflags.QuickMenuLocked = !!v;
+			updateLockState();
+			if(!isBlank(comp))
+				comp.updateLockState();
+		}
+	}
+
+	function createOffTimer() {
+		offtimer = new Timer(this, "onOffTimer");
+		var interval = int(+SystemConfig.QuickMenuOffTimerInterval);
+		if (interval <= 0) interval = 3000;
+		with (offtimer) {
+			.capacity = 1;
+			.interval = interval;
+			.mode = atmAtIdle;
+		}
+	}
+	function onOffTimer() {
+		if (!isvalid this ||!isvalid window) return;
+		offtimer.enabled = false;
+		updown(%[hide:true]);
+	}
+
+	function finalize() {
+		if (isvalid this) {
+			delAction();
+			hideAllTips();
+			invalidate tip if (tip);
+			invalidate offtimer if (offtimer);
+		}
+		super.finalize(...);
+	}
+
+	property showing {	// 所有中间状态都视为显示中
+		getter{
+			return opacity >0;
+		}
+	}
+
+	function onUiloaded(elm, ui) {
+		for (var i = 0; i < links.count; i++) {
+			var obj = links[i].object;
+			var elm =%[target:obj,prop:"enabled",get:_btnEnabledGet  incontextof obj,set:_btnEnabledSet incontextof obj,
+				method:"onMouseEnter",func:_btnOnMouseEnter incontextof obj];
+			objectHookInjection(elm);
+			elm = %[target:obj,method:"onMouseLeave",func:_btnOnMouseLeave incontextof obj];
+			objectHookInjection(elm);
+			elm = %[target:obj,method:"onMouseDown",func:_btnOnMouseDown incontextof obj];
+			objectHookInjection(elm);
+			elm = %[target:obj,method:"onClick",func:_btnOnClick incontextof obj];
+			objectHookInjection(elm);
+			elm = %[target:obj,method:"onMouseUp",func:_btnOnMouseUp incontextof obj];
+			objectHookInjection(elm);
+			elm = %[target:obj,method:"onKeyDown",func:_btnOnKeyDown incontextof obj];
+			objectHookInjection(elm);
+			hookState[obj.name] = true; // 记录按钮的可用状态
+		}
+	}
+
+
+	//--------------按钮提示(因为有了helptextman作为替代，下面的可以忽视)-----------------
+	var currentEnter;
+	function onButtonEnter(name) {
+		showHideHelpTip((currentEnter = name), true);
+	}
+	function onButtonLeave(name) {	// 离开按钮 隐藏提示
+		currentEnter = "" if (currentEnter == name);
+		if (isBlank(name)) hideAllTips(true);
+		else showHideHelpTip(name, false);
+	}
+
+	function showHideHelpTip(name, vis) {	// 显示提示  如何显示 以及动画需要子类覆盖
+		if (!tip) return;
+		delAction("tip");
+		if (!canShowHelpTip()) return hideAllTips();
+		if (vis) drawTipText(tip, name);
+		var act = getTipAction(vis, name);
+		if (act !== void) {
+			tip.visible = true;
+			beginAction("tip", true,act);
+		}
+		if (name == "qload") showHideQLoadPopup(vis);
+	}
+	function hideAllTips(onleave) {	// 隐藏全部提示
+		tip.visible = false if (tip);
+		showHideQLoadPopup(false);
+	}
+	// abstract method
+	function showHideQLoadPopup(){};
+	function canShowHelpTip(init) { return false; } //SystemConfig.QuickMenuEnableHelpTip; }
+	function getTipAction(vis, name) {}
+	function drawTipText(lay, name) {}
+	function createHelpTipLayer() {	// 创建提示层基层
+		var lay = new Layer(window, this);
+		with (lay) {
+			.hitType = htMask;
+			.hitThreshold = 256;
+			.enabled = false;
+			.name = "help tip";
+			.absolute =0;
+		}
+		return lay;
+	}
+	//----------------------------弹出和隐藏的逻辑--------------------------------------
+	function updateLockState(state = locked) {	// 更新锁定状态
+		if (names.hold !== void)
+			names.hold.toggle = !!state;
+		resetPosition();
+	}
+	function _inQuickMenuArea(x,y){
+		var w = isBlank(SystemConfig.QuickMenuPopWidth)?width:SystemConfig.QuickMenuPopWidth;
+		var h = isBlank(SystemConfig.QuickMenuPopHeight)?height:SystemConfig.QuickMenuPopHeight;
+		return (x<=parent.width && x>= parent.width-w && y<=parent.height && y>= parent.height-h);
+	}
+	function onScreenMouseMove(x,y){
+		if(!nodeVisible)return;
+		if(showing && !_inQuickMenuArea(parent.cursorX,parent.cursorY)) {	// 隐藏方法
+			if(!isActive)
+				updown(%[hide:true]);
+		}
+		if(!showing && _inQuickMenuArea(parent.cursorX,parent.cursorY)) //显示方法
+		{
+			focus();
+			updown(%[show:true]);
+		}	
+	}
+	function onScreenMouseLeave(){
+		if(!nodeVisible)return;
+		offtimer.enabled = true;
+	}
+
+	function updown(elm){
+		if(!canDropDown)return;
+		delAction("updown");
+		if(!isBlank(elm,"show") && elm.show && showing)return;
+		if(!isBlank(elm,"hide") && elm.hide && !showing)return;
+		var time = isBlank(elm,"time")?btnFadeTime:elm.time;
+		if(this.showing){
+			addAction("updown",true,[%[ top:	%[handler:MoveAction,time:time,value: parent.height],
+									    opacity:%[handler:MoveAction,time:time,value:0,start:255],nofast:true]]);
+		}else{
+			window.focusedLayer = null;
+			addAction("updown",true,[%[ top:	%[handler:MoveAction,time:time,value: parent.height - this.height],
+									    opacity:%[handler:MoveAction,time:time,value:255,start:0],nofast:true]]);
+		}
+	}
+
+	function resetPosition() {
+		delAction("updown");
+		var x,y;
+		x = parent.width - this.width;
+		if(locked){
+			opacity = 255;
+			y = parent.height - this.height;
+		}else{
+			opacity = 0;
+			y = parent.height;
+		}
+		setPos(x,y);
+	}
+
+	property canDropDown { getter { // 是否可以上拉或下潜
+		if(locked)return false; 
+		var r=true;
+		if (SystemConfig.QuickMenuShowInAutoSkip) with (window) {
+			if (.autoMode || .skipMode >= SKIP_STOP) r = false;
+		}
+		return r;
+	} }
+	/** 
+	* @description: 	获得焦点时弹出显示
+	* @param ...	不参与逻辑
+	* @return 	void
+	*/	
+	function onBeforeFocus(layer, blured, direction)
+	{	
+		if(canDropDown){
+			updown(%[show:true]);
+			stopAction("updown");
+		}
+		super.onBeforeFocus(...);
+	}
+	
+	//-----------------下面是一些状态变更的逻辑-------------
+	function onRestore(flags){
+		locked = flags.QuickMenuLocked;
+	}
+	
+	function onModeChange(elm) {
+		// dm(@"debug modechange:canAuto:${elm.canAuto},canSkip:${elm.canSkip},autoMode:${elm.autoMode},skipMode:${elm.skipMode},inStable:${elm.inStable}");
+		with(elm){
+			// setSelProcessLock(false);
+			if (SystemConfig.QuickMenuShowInAutoSkip) {
+				var as = .autoMode ||.skipMode;
+				if (as) updown(true);
+				else with (window.primaryLayer) {
+					onScreenMouseMove(.cursorX, .cursorY);
+				}
+			}
+		}
+		_resetButton(...);
+	}
+
+	function _resetButton(elm) {
+		with (elm) {
+			// if (isModeChanged("dsvreplay", (en = .hasCurrentVoice && !skip)))	ds("vreplay", en);
+			// if (isModeChanged("dsqload", (en = SystemAction.canQuickLoad && !.isRecollection)))		ds("qload",   en);
+			// if (isModeChanged("dsprev", (en = .isHistoryOfStoreAlive())))		ds("prev",    en);
+			// if (isModeChanged("dsnext", (en = prop.get("skip", "enabled"))))	ds("next",    en);
+			names.skip.toggle =.skipMode;
+			names.skip.enabled =.canSkip;
+			names.auto.toggle =.autoMode;
+			names.auto.enabled =.canAuto;
+			names.option.enabled = SystemHook.currentState == "game";
+			names.backlog.enabled = SystemHook.currentState == "game" && .inStable;
+			names.load.enabled = SystemHook.currentState == "game";
+			names.save.enabled = SystemHook.currentState == "game";
+		}
+	}
+
+	function assign(src){
+		locked = src.locked;
+		resetPosition();
+	}
+
+}
+// 一个自动模式 和快进模式 按钮闪烁的做法
+/*
+class        QuickMenuWithBrink extends QuickMenuLayerBase {
+	function QuickMenuWithBrink { super.QuickMenuLayerBase(...);
+		brinkTimer = new Timer(this, "onBrink");
+		with (brinkTimer) {
+			.enabled = false;
+			.capacity = 1;
+			.interval = 100;
+			.mode = atmNormal;
+		}
+	}
+	function finalize {
+		if (isvalid this) {
+			invalidate brinkTimer if (brinkTimer);
+		}
+		super.finalize(...);
+	}
+	var brinkTimer, brinkBase, brinkSkip, brinkAuto;
+	function brinkLight(sel, vis) {
+		if (sel) brinkSkip = vis; else brinkAuto = vis;
+		var en = (brinkSkip || brinkAuto);
+		var old = brinkTimer.enabled;
+		if     (!en &&  old) brinkTimer.enabled = false;
+		else if (en && !old) {
+			brinkBase = System.getTickCount();
+			brinkTimer.enabled = true;
+		}
+		var target = names[sel ? "hl_skip" : "hl_auto"];
+		target.visible = vis if (target !== void);
+	}
+	function getBrinkOpacity(bc, div) {
+		var r = (bc \ div) % 512;
+		return (r < 256) ? r : 511 - r;
+	}
+	function onBrink() {
+		var btn, bc = System.getTickCount() - brinkBase;
+		if ((btn = names.hl_skip) !== void) btn.opacity = getBrinkOpacity(bc, 3);
+		if ((btn = names.hl_auto) !== void) btn.opacity = getBrinkOpacity(bc, 7);
+	}
+
+	function onModeChanged(prop, kag, auto, skip, canauto, canskip, ss, modal, cr) {
+		var r = super.onModeChanged(...);
+		if (isModeChanged("autoLight", auto)) brinkLight(0, auto);
+		if (isModeChanged("skipLight", skip)) brinkLight(1, skip);
+		return r;
+	}
+}
+*/
+// global.QuickMenu =  QuickMenuLayerBase;
+@if (0)
+// customized sample code:
+class        CustomQuickMenu extends QuickMenuLayerBase {
+	function CustomQuickMenu { super.QuickMenuLayerBase(...); }
+	function finalize { super.finalize(...); }
+
+	var tipTexts = %[
+	lock:	"ツールバーを固定/解除します",
+	hide:	"ウィンドウを閉じます",
+	vreplay:"音声を再生します",
+	qsave:	"クイックセーブします",
+	qload:	"クイックロードします",
+	save:	"セーブメニューを開きます",
+	load:	"ロードメニューを開きます",
+	log:	"過去ログを表示します",
+	auto:	"オートモードへ移行します",
+	skip:	"スキップモードへ移行します",
+	prev:	"前の選択肢に飛びます",
+	next:	"次の選択肢に飛びます",
+	option:	"設定メニューを開きます",
+	love:	"好感度表を表示します",
+		];
+	function drawTipText(lay, tag) {
+		var tip = lay;
+		var text = tipTexts[tag], w, h, pad=4;
+		with (tip.font) {
+			w = .getTextWidth (text) + pad*2;
+			h = .getTextHeight(text) + pad*2;
+		}
+		with (tip) {
+			.setSize(w, h);
+			.fillRect(0, 0, w,   h,   0xFFF9F0BF);
+			.fillRect(1, 1, w-2, h-2, 0xC0000000);
+			.drawText(pad, pad, text, 0xFFFFFF, 255, true);
+		}
+		var target = names[tag];
+		if (target === void) return;
+		with (target) {
+			var x = (.left + .parent.left + .width\2);
+			tip.setPos(x-w\2, _ontop-h+pad);
+		}
+	}
+	var tipFadeTime = 100;
+	function getTipAction(vis, tag) {
+		return  vis ? %[ opacity: %[ handler:MoveAction, start:0, value:255, time:tipFadeTime ] ]
+			/**/    : %[ opacity: %[ handler:MoveAction, start:255, value:0, time:tipFadeTime ] ];
+	}
+	function canShowHelpTip(init) { return init || window.scflags.showHelpTips; }
+}
+global.QuickMenuClass = CustomQuickMenu;
+@endif

@@ -1,0 +1,1349 @@
+class LinkButtonLayer extends ButtonLayer
+{
+	// グラフィカルボタンとして動作するためのレイヤ
+	var linkNum; // リンク番号
+	var onenter; // マウスが入ってきたときに実行するもの
+	var onleave; // マウスが出ていったときに実行するもの
+	var exp;
+	var storage;
+	var target;
+    var _focusable;
+	var _enabled;
+
+	function LinkButtonLayer(win, par)
+	{
+		// コンストラクタ
+        super.ButtonLayer(...);
+		enabled  = true;
+        joinFocusChain = false; // フォーカスチェーンには参加しない
+        hint = "";
+	}
+
+	function finalize()
+	{
+		super.finalize(...);
+	}
+	property AcObj {//所有者的行为控制器	
+		getter{return parent.action;}
+	}
+
+	function onClick()
+	{
+        super.onClick(...);
+	}
+
+	function onMouseUp(x, y, button, shift)
+	{
+		var trig =this isvalid && enabled && button == mbLeft && !parent.selProcessLock; // toggle改变会导致这些参数改变，事先存储
+        if(!trig)return;
+		super.onMouseUp(...); //父类会改变toggle
+		// 保证toggle状态改变不影响触发逻辑,这些逻辑依然有可能再次导致toggle状态改变
+		Scripts.eval(exp,'','',this) if !isBlank(exp);
+		if(!isBlank(storage) || !isBlank(target))
+		{
+			window.process(storage,target);
+		}
+		parent.onLinkTrigger(linkNum); 
+	}
+
+	function onKeyDown(key, shift, process){
+		var isEnterKey = window.getKeyState(VK_RETURN) || window.getKeyState(VK_SPACE);
+		if(enabled && !parent.selProcessLock && isEnterKey){
+			Scripts.eval(exp,'','',this) if !isBlank(exp);
+			if(!isBlank(storage) || !isBlank(target))
+			{
+				window.hideMouseCursor(); 
+				window.process(storage,target);
+			}
+			parent.onLinkTrigger(linkNum); 
+		}
+		super.onKeyDown(...);
+	}
+
+	function onMouseDown(x, y, button)
+	{
+		if(parent.selProcessLock)return;
+		super.onMouseDown(...);
+        if (button == mbRight) {
+			releaseCapture();
+            window.onPrimaryRightClick();
+        }
+	}
+    
+	function onMouseEnter()
+	{
+		if(parent.selProcessLock)return;
+		if(onenter!=void) Scripts.eval(onenter,'','',this);
+		if(focusable){
+			parent.keyLink = linkNum;
+			focus();
+		}
+		super.onMouseEnter(...);
+	}
+
+	function onMouseLeave()
+	{
+		if(parent.selProcessLock)return;
+		if (parent.keyLink == linkNum){
+			window.focusedLayer = null;
+			parent.keyLink = -1;
+		}
+		if(onleave !== void) Scripts.eval(onleave,'','',this);
+		super.onMouseLeave(...);
+	}
+
+	function onSearchPrevFocusable(layer)
+	{
+		super.onSearchPrevFocusable(parent.findPrevFocusable(this, layer));
+	}
+
+	function onSearchNextFocusable(layer)
+	{
+		super.onSearchNextFocusable(parent.findNextFocusable(this, layer));
+	}
+
+	function onFocus(prevfocused, direction)
+	{
+		parent.keyLink = linkNum;
+		super.onFocus(...);
+	}
+	function onBlur(obj){
+		parent.keyLink = -1 if (parent.keyLink == linkNum);
+		super.onBlur(...);
+	}
+
+	function assign(src)
+	{
+		super.assign(src);
+		linkNum = src.linkNum;
+		onenter = src.onenter;
+		onleave = src.onleave;
+		exp = src.exp;
+		storage = src.storage;
+		target = src.target;
+		hint = src.hint;
+		enabled          = src._enabled;
+		focusable        = src._focusable;
+	}
+
+    property enabled {
+        // 有効かどうか
+        // 無効な場合はイベントを透過させる
+        setter(x) {
+			_enabled = x;
+			var en = _enabled && !(radio && toggle); // toggle 无法继续点击
+            super.enabled = en;
+            if (en) {
+                super.focusable = _focusable;
+            } else {
+                super.focusable = false;
+            }
+        }
+        getter() {
+            return _enabled && !(radio && toggle);
+        }
+    }
+
+	property focusable 
+	{
+		// イベントを透過するかどうか
+		setter(x)
+		{
+            _focusable = x;
+            super.focusable = x && enabled;
+        }
+        getter()
+		{
+            return _focusable && enabled;
+		}
+	}
+
+	 property toggle {
+        getter() {
+            return super.toggle;
+        }
+        setter(v) {
+            super.toggle = v;
+			if (radio) {
+				parent.updateRadio(this) if (v);
+				enabled   = _enabled;		//toggle改变，为了触发父类的enabled 改变
+				focusable = _focusable;
+            }
+        }
+    }
+	property radio { getter { return groupName != ""; } }
+}
+
+class LinkCheckBoxLayer extends CheckBoxLayer
+{
+	// メッセージレイヤに「リンク」として管理されるための
+	// チェックボックス
+	var linkNum; // リンク番号
+	var exp; // 式
+    var change; // 変更式
+    var vertical; // 縦書きモード
+
+	function LinkCheckBoxLayer(win, par)
+	{
+		// コンストラクタ
+		super.CheckBoxLayer(...);
+		joinFocusChain = false; // フォーカスチェーンには参加しない
+		hint = "";
+	}
+
+	function finalize()
+	{
+		super.finalize(...);
+	}
+	property AcObj {//所有者的行为控制器	
+		getter{return parent.action;}
+	}
+	function assign(src)
+	{
+		super.assign(src);
+		linkNum = src.linkNum;
+		vertical = src.vertical;
+		hint = src.hint;
+		exp = src.exp;
+	}
+
+	function onKeyDown(key, shift, process)
+	{
+		// 縦書きの時は右と左を入れ替える
+		if(vertical)
+		{
+			if(key == VK_LEFT) key = VK_RIGHT;
+			else if(key == VK_RIGHT) key = VK_LEFT;
+		}
+		super.onKeyDown(key, shift, process);
+		parent.onLinkTrigger(linkNum); 
+	}
+
+	function onSearchPrevFocusable(layer)
+	{
+		super.onSearchPrevFocusable(parent.findPrevFocusable(this, layer));
+	}
+
+	function onSearchNextFocusable(layer)
+	{
+		super.onSearchNextFocusable(parent.findNextFocusable(this, layer));
+	}
+
+	function onFocus(prevfocused, direction)
+	{
+		parent.keyLink = linkNum;
+		super.onFocus(...);
+	}
+	function onBlur(obj){
+		parent.keyLink = -1;
+		super.onBlur(...);
+	}
+
+	function commit()
+	{
+		kag.inputTemp = checked;
+		Scripts.eval(("(" + exp + ") = kag.inputTemp"));
+	}
+
+    function onChange(checked)
+    {
+        if (change !== void) {
+            kag.inputTemp = checked;
+            Scripts.eval(("(" + change + ") = kag.inputTemp"));
+        }
+    }
+
+	function onMouseDown(x, y, button)
+	{
+		super.onMouseDown(...);
+        if(button == mbRight) {
+            window.onPrimaryRightClick();
+        }
+	}
+}
+
+
+class LinkEditLayer extends EditLayer
+{
+	// メッセージレイヤに「リンク」として管理されるための
+	// 単一行編集レイヤ
+	var linkNum; // リンク番号
+	var exp; // 式
+
+	function LinkEditLayer(win, par)
+	{
+		// コンストラクタ
+		super.EditLayer(...);
+		joinFocusChain = false; // フォーカスチェーンには参加しない
+		hint = "";
+	}
+
+	function finalize()
+	{
+		super.finalize(...);
+	}
+	property AcObj {//所有者的行为控制器	
+		getter{return parent.action;}
+	}
+	function assign(src)
+	{
+		super.assign(src);
+        name = src.name;
+		linkNum = src.linkNum;
+		exp = src.exp;
+	}
+
+	function onKeyDown(key, shift, process)
+	{
+		// 縦書きの時は右と左を入れ替える
+		if(Edit_vertical)
+		{
+			if(key == VK_LEFT) key = VK_RIGHT;
+			else if(key == VK_RIGHT) key = VK_LEFT;
+		}
+		super.onKeyDown(key, shift, process);
+	}
+
+	function onSearchPrevFocusable(layer)
+	{
+		super.onSearchPrevFocusable(parent.findPrevFocusable(this, layer));
+	}
+
+	function onSearchNextFocusable(layer)
+	{
+		super.onSearchNextFocusable(parent.findNextFocusable(this, layer));
+	}
+
+	function onFocus(prevfocused, direction)
+	{
+		parent.keyLink = linkNum;
+		super.onFocus(...);
+	}
+	function onBlur(obj){
+		parent.keyLink = -1;
+		super.onBlur(...);
+	}
+
+	function commit()
+	{
+		if (exp == "") return;
+		kag.inputTemp = text;
+		Scripts.eval(("(" + exp + ") = kag.inputTemp"));
+	}
+
+	function onMouseDown(x, y, button)
+	{
+		super.onMouseDown(...);
+        if(button == mbRight) {
+			releaseCapture();
+            window.onPrimaryRightClick();
+        }
+	}
+}
+
+class LinkSliderLayer extends SliderLayer
+{
+    // メッセージレイヤに「スライダ」として管理されるためのスライダ
+	var linkNum; // リンク番号
+    var exp; // 式
+    var change; // 変更式
+	var changefunc; // 変更関数
+    var changese; // 変更時SE
+
+    function LinkSliderLayer(win, par)
+    {
+        // コンストラクタ
+        super.SliderLayer(...);
+        joinFocusChain = false;
+        hint = "";
+    }
+    
+	function finalize()
+	{
+		super.finalize(...);
+	}
+	property AcObj {//所有者的行为控制器	
+		getter{return parent.action;}
+	}
+	function assign(src)
+	{
+		super.assign(src);
+		linkNum = src.linkNum;
+		changefunc = src.changefunc;
+		exp = src.exp;
+        changefunc = src.changefunc;
+        change = src.change;
+        changese = src.changese;
+	}
+
+	function onSearchPrevFocusable(layer)
+	{
+		super.onSearchPrevFocusable(parent.findPrevFocusable(this, layer));
+	}
+
+	function onSearchNextFocusable(layer)
+	{
+		super.onSearchNextFocusable(parent.findNextFocusable(this, layer));
+	}
+
+	function onMouseEnter()
+	{
+		if(parent.selProcessLock)return;
+		if(focusable){
+			parent.keyLink = linkNum;
+			focus();
+		}
+		super.onMouseEnter(...);
+	}
+
+	function onMouseLeave()
+	{
+		if (parent.keyLink == linkNum){
+			window.focusedLayer = null;
+			parent.keyLink = -1;
+		}
+		super.onMouseLeave(...);
+	}
+	function onFocus(prevfocused, direction)
+	{
+        parent.keyLink = linkNum;
+        super.onFocus(...);
+	}
+	function onBlur(obj){
+		parent.keyLink = -1 if (parent.keyLink == linkNum);
+		super.onBlur(...);
+	}
+
+	function commit()
+	{
+		kag.inputTemp = position;
+		Scripts.eval(("(" + exp + ") = kag.inputTemp"),'','',this);
+	}
+
+	function onChange(position, dragging)
+    {
+        if (changefunc !== void) {
+            Scripts.eval(changefunc,'','',this)(position, dragging);
+        } else if (change !== void) {
+            kag.inputTemp = position;
+            Scripts.eval(("(" + change + ") = kag.inputTemp"),'','',this);
+            if (changese !== void && !dragging) {
+                Scripts.eval(changese);
+            }
+        }
+    }
+
+
+	function onMouseDown(x, y, button)
+	{
+		if(parent.selProcessLock)return;
+		super.onMouseDown(...);
+		parent.onLinkTrigger(linkNum,position); 
+        if(button == mbRight) {
+			releaseCapture();
+            window.onPrimaryRightClick();
+        }
+	}
+}
+class DialogAction{
+    var owner;  // 使用之前务必设置
+    function DialogAction(){
+
+    }
+    // funcのeval式から呼び出す用（引数の順番を変える必要があるため）	用于从func的eval表达式调用（因为需要改变参数的顺序）
+	// eval,*,call,AcObj.uiEval,method, ... -> method(target,dic, ...);
+	function uiEval(t,r,m,*) { return action(m,t,r,*); }
+	// .func 文件是以，分割，无法用正常方式调用方法,一种解决方式
+	function func(str) {
+		var args = str.split("/");
+		var method = args[0];
+		args.erase(0);
+		return this[method](args*);
+	}
+    function onUiload(elm){}
+    function onUiloaded(elm){}
+}
+class DialogLayer extends GraphicLayer{
+	var layerType = ltAlpha; // レイヤタイプ
+
+	var frameGraphic = ""; // フレーム画像ファイル名
+	var frameKey = clNone; // フレーム画像キー
+	var frameColor = 0x000000; // フレームの色
+    var frameOpacity = 255; // フレームの不透明度
+	var id;
+	var links = [];
+	var names = %[];
+	var numLinks = 0;
+	var lastLink = -1; // 最後に選択したリンク番号
+	var _keyLink = -1; // キーボードで選択したリンク番号（keyLinkはproperty化：lastLinkと２重に持つ）
+	property keyLink {// キーボードで選択したリンク番号
+		getter { return _keyLink; }
+		setter(v) {
+			_keyLink = v;
+			lastLink = v if (v >= 0);
+			if(lastLink != _keyLink ){
+				if(_keyLink==-1)
+					onInactive();
+				else if(lastLink==-1)
+					onActive();
+			}
+		}
+	}
+	var _isSetMode = false;  // モーダル状態かどうか
+	property isSetMode{
+		getter{
+			return _isSetMode;
+		}
+		setter(v){
+			_isSetMode = v;
+			if(!visible || !enabled)dm("warnning: set mode at not fitable layer:"+name +","+Scripts.getTraceString());
+			if(_isSetMode) super.setMode();
+			else super.removeMode();
+		}
+	}
+
+	var storedSelProcessLock = false; // storeSelProcessLock 時点での状態
+	var selProcessLock = false; // process 後にリンクが操作されるのを防ぐためのフラグ   按下按键时 是否进行焦点的移动,为true后变为锁定状态，禁止操作与焦点移动
+	var eventTransparent = true; // イベントの透過									事件是否穿透
+	var comp;		//对层
+	var action; //可以控制扩展行为的对象
+	var _storeArr = []; // 用于存档 读档时的数组
+
+	// リンクタイプ  linkType
+    var ltLayer   = 1;		// layer实际是用button做的。所有这个实际用不到
+    var ltButton   = 2;
+    var ltEdit     = 3;
+    var ltCheckBox = 4;
+    var ltSlider   = 5;
+	function DialogLayer(owner, parent, name,id){
+		super.AnimationLayer(...);
+		this.name = name;
+		this.id=id;
+		type = layerType;
+        // 当たり判定初期化
+        hitType = htMask;
+        hitThreshold = 0; // マウスメッセージは全域不透過         不穿透事件
+        // サイズはデフォルトで決定する   自动决定大小
+		imageModified = true;
+		focusable = false;
+	}
+	function finalize(){
+		invalidateLinkObjects();
+		invalidate action;
+		super.finalize();
+	}
+	// setMode/removeMode をフックしてモーダル状態のフラグを保持
+	function setMode()    { isSetMode = true;  }
+	function removeMode() { isSetMode = false; }
+
+	property isActive {
+		getter{
+			return focused || keyLink!=-1;
+		}
+	}
+	//-----------------------dialog 特有的逻辑-----------------
+    /** 
+     * @description: 	单纯的模态打开方式，防止焦点移到其它层，如果要用于对话框级别的，请使用子类的myyesnodialoglayer
+     * @return 	void
+     */	
+    function open() {
+        visible =true;
+		setMode();
+		focus();
+    }
+
+    /**
+     * オープン直後によばれる
+     */
+    function onOpen() {
+    }
+
+ 	/**
+     * 閉じる処理
+     */
+    function close() {
+        visible = false;
+        removeMode();
+		window.focusedLayer = null;
+    }
+	function redraw(){
+		if (isBlank(frameGraphic)) {
+			// フレーム画像が指定されていない場合
+			face = dfAuto;
+			if(type == ltAddAlpha) {
+				fillRect(0, 0, imageWidth, imageHeight, (frameOpacity << 24) +
+							((int)((((frameColor&0xff0000)>>16) * frameOpacity) / 255)<<16 ) +
+							((int)((((frameColor&0x00ff00)>> 8) * frameOpacity) / 255)<< 8 ) +
+							((int)((((frameColor&0x0000ff)    ) * frameOpacity) / 255)     ) );
+			} else {
+				fillRect(0, 0, imageWidth, imageHeight, (frameOpacity << 24) + frameColor);
+			}
+
+		} else {
+			// センタリング表示
+			loadImages(%[storage:frameGraphic, key:frameKey]);
+			setSizeToImageSize();
+			// frameOpacityを適用する
+			if (frameOpacity < 255) {
+				face = dfAlpha;
+				colorRect(0, 0, imageWidth, imageHeight, 0, -255 + frameOpacity);
+				face = dfAuto;
+			}
+		}
+	}
+	function clearLayer(){
+		if(imageModified) {
+           redraw();
+		}
+        imageModified = false;
+        focusable = false;
+        invalidateLinkObjects(); // リンクに関連づけられたオブジェクトを無効化  无效化关联的link对象
+		lastLink = keyLink = -1;
+
+        // 場所の初期化
+        // setPos(((parent.width  - width)>>1), ((parent.height - height)>>1));
+	}
+
+	/** 
+	* @description: 	对话层的层设置方法，这里的设置屏蔽了opacity的模式，只能设置此层的背景的透明度，无法影响子层
+	* @param elm	参数
+	* @return 		void
+	*/
+	function setOptions(elm)
+	{	
+        imageWidth  = elm.width  if elm.width !== void;
+        imageHeight = elm.height if elm.height !== void;
+        setSizeToImageSize();
+
+		frameGraphic  = elm.frame    if elm.frame !== void;
+		frameKey      = elm.framekey if elm.framekey !== void;
+		frameColor    = +elm.color   if elm.color !== void;
+        frameOpacity  = +elm.opacity if elm.opacity !== void;
+		if(elm.frame !== void) redraw();
+		if(!isBlank(elm.object)){
+			invalidate action;	// 清除action对象
+			invalidate comp.action if(!isBlank(comp));	// 清除action对象
+			
+			if(!(elm.object == "null" || elm.object == "void")){
+				var obj = elm.object.toUpperCase();	// 尽量使用大写
+				var func;
+				if(!isBlank(global,obj)) func = global[obj];
+				else if(!isBlank(global,obj.toLowerCase())) func = global[obj.toLowerCase()];
+				else throw new ConductorException("paramter obj is not correct!");
+				action = func();
+				action.owner = this;	// 设置所有者为自己
+				if(!isBlank(comp))with(comp){
+					.action = func();
+					.action.owner = comp;	// 设置所有者为自己
+				}
+			}
+		}
+		delete elm.opacity; //透明度直接用背景图片 不需要这个参数
+        super.setOptions(elm);
+		eventTransparent = +elm.transparent if elm.transparent !== void;
+		isSetMode = +elm.mode if elm.mode !== void;
+        imageModified = true; // 強制的にメッセージレイヤをクリアするために
+    }
+
+
+	function updateRadio(button) {
+        for(var i = links.count-1; i>=0; i--) {
+            var l = links[i];
+            if (l.type == ltButton && l.object !== button && l.object.groupName == button.groupName) {
+                l.object.toggle = false;
+            }
+        }
+    }
+    
+
+	function invalidateLinkObjects()  //清空所有非文字超链的控件
+	{
+		// リンクアイテムにオブジェクトが割り当てられていた場合無効化
+		for(var i = links.count-1; i>=0; i--)
+		{
+			invalidate links[i].object;
+			delete links[i];
+		}
+		(Dictionary.clear incontextof names)(); 
+		numLinks = 0;
+		_storeArr = [];
+		setSelProcessLock(false); // 解除锁定
+	}
+
+	function createSoundExpression(exp, storage, buf)
+	{
+		// サウンドを鳴らすための式を作成する  生成让发声的表达式
+		// exp になにか式があった場合はカンマでつなぐ   exp中有什么式的情况下用逗号链接
+		// この仕様は後で変更するかも    此方法以后可能会变更
+		if(storage === void) return exp;
+		if(buf === void) buf = 0;
+		var seexp = "(kag.se["+buf+"].play(%[storage:\"" + storage.escape() +"\"]))";
+		if(exp !== void)
+			exp = seexp + ",("+exp+")";
+		else
+			exp = seexp;
+		return exp;
+	}	
+	function onUiload(elm){
+		if(!isBlank(action))
+			action.onUiload(elm);
+	}
+	function onUiloaded(elm){
+		if(!isBlank(action))
+			action.onUiloaded(elm);
+	}
+	function copyLink(name,newName){
+		var num;
+		if(typeof name == "String")
+			num = names[name].linkNum;
+		else if(typeof name == "Integer")
+			num = name;
+		else throw new Exception("invalid paramter type");
+		if(num<0 || num >=numLinks)throw new Exception("paramater not in right range");
+		
+		var item = links[num];
+		var elm =_storeArr[num];
+		elm.name = newName;
+		switch(item.type){
+			case ltLayer: addLayer(elm);break;
+			case ltButton: addButton(elm); break;
+			case ltCheckBox: addCheckBox(elm);break;
+			case ltEdit: addEdit(elm);break;
+			case ltSlider: addSlider(elm);break;
+		}
+	}
+	function addLayer(elm)
+	{
+		elm.type = ltLayer;
+		_storeArr.push(elm);
+		// グラフィカルボタンを配置   增加图形按钮
+		var object = new LinkButtonLayer(window, this);
+         object.name =  elm.name !== void ? elm.name : "layer" + numLinks;
+        if (elm.uistates !== void) {
+            object.loadUIInfo(elm);
+			object.uiname = elm.uiname;
+        } else if (elm.normal !== void) {	// 可以做一些鼠标移入改变颜色之类的操作
+			var over   = elm.over !== void ? elm.over  : getExistImageName(elm.normal.replace(/_normal/, "_over"));
+            // var on     = elm.on   !== void ? elm.on    : getExistImageName(elm.normal.replace(/_normal/, "_on"));
+  			object.loadButtons(elm.normal, over);
+        }
+		else if (elm.text != "") with (object) {
+			.setSize(elm.width, elm.height);
+			.font.face = elm.face if (elm.face != "");
+			.font.height = +elm.fontsize if (elm.fontsize !== void);
+			.caption = elm.text;
+			.captionColor = +elm.color if (elm.color != "");
+			.color   = +elm.bgcolor    if (elm.bgcolor !== void);
+			.oncolor = +elm.oncolor    if (elm.oncolor !== void);
+		} 
+		else {
+			if (elm.graphicon != "") {
+				object.loadImages(elm.graphicon, elm.graphickey,true);
+			} else {
+				object.loadImages(elm.graphic, elm.graphickey);
+			}
+        }
+        object.linkNum = numLinks;
+		object.absolute = elm.absolute if(!isBlank(elm.absolute));
+        object.setPos(elm.x, elm.y);
+		object.eventTransparent = +elm.transparent if elm.transparent !== void;		//注意该选项优先级很高
+		object.hint = elm.hint;
+        object.visible = (elm.visible !== void) ? elm.visible : true;
+		object.focusable = false;				//layer 对象不能接受焦点
+		object.onenter = createSoundExpression(elm.onenter, elm.enterse, elm.entersebuf);
+		object.onleave = createSoundExpression(elm.onleave, elm.leavese, elm.leavesebuf);
+        object.hitThreshold = (elm.recthit === void || +elm.recthit) ? 0 : 64;
+        object.enabled = false;
+        object.enabled = elm.enabled if (elm.enabled !== void);
+
+		links[numLinks] = %[type :ltLayer,object :object];
+		numLinks++;
+		names[object.name] = object;
+	}
+	function addButton(elm)
+	{
+		elm.type = ltButton;
+		_storeArr.push(elm);
+		// グラフィカルボタンを配置   增加图形按钮
+		var object = new LinkButtonLayer(window, this);
+        object.name =  elm.name !== void ? elm.name : "button" + numLinks;
+        if (elm.uistates !== void) {
+            object.loadUIInfo(elm);
+			object.uiname = elm.uiname;
+        } else if (elm.normal !== void) {
+			var over   = elm.over !== void ? elm.over  : getExistImageName(elm.normal.replace(/_normal/, "_over"));
+            var on     = elm.on   !== void ? elm.on    : getExistImageName(elm.normal.replace(/_normal/, "_on"));
+            var focus  = elm.over !== void ? elm.focus : getExistImageName(elm.normal.replace(/_normal/, "_focus"));
+            if (elm.trigger || elm.group) {
+                object.loadButtons(elm.on, over, on, focus, true);
+                object.groupName = elm.group;
+            }else   object.loadButtons(elm.normal, over, on, focus);
+        }
+		else if (elm.text != "") with (object) {
+			.setSize(elm.width, elm.height);
+			.font.face = elm.face if (elm.face != "");
+			.font.height = +elm.fontsize if (elm.fontsize !== void);
+			.caption = elm.text;
+			.captionColor = +elm.color if (elm.color != "");
+			.color   = +elm.bgcolor    if (elm.bgcolor !== void);
+			.oncolor = +elm.oncolor    if (elm.oncolor !== void);
+		} 
+		else {
+			if (elm.graphicon != "") {
+				object.loadImages(elm.graphicon, elm.graphickey,true);
+				object.groupName = elm.group;
+			} else {
+				object.loadImages(elm.graphic, elm.graphickey);
+				if (elm.trigger || elm.group != "") {
+					object.makeToggle();
+					object.groupName = elm.group;
+				}
+			}
+        }
+        object.linkNum = numLinks;
+        object.setPos(elm.x, elm.y);
+		object.hint = elm.hint;
+		object.absolute = elm.absolute if(!isBlank(elm.absolute));
+        object.visible = (elm.visible !== void) ? elm.visible : true;
+		object.onenter = createSoundExpression(elm.onenter, elm.enterse, elm.entersebuf);
+		object.onleave = createSoundExpression(elm.onleave, elm.leavese, elm.leavesebuf);
+        object.hitThreshold = (elm.recthit === void || +elm.recthit) ? 0 : 64;
+		object.exp = createSoundExpression(elm.exp, elm.clickse, elm.clicksebuf);
+		object.storage = elm.storage;
+		object.target = elm.target;
+        object.enabled = elm.enabled if (elm.enabled !== void);
+
+
+		links[numLinks] = %[type :ltButton,object :object];
+		numLinks++;
+		names[object.name] = object;
+		focusable = true; // フォーカスを受け取れるように
+		setSelProcessLock(false); // 選択ロック解除
+	}
+
+	function addEdit(elm)
+	{
+		elm.type = ltEdit;
+		_storeArr.push(elm);
+		var object = new LinkEditLayer(window, this, vertical);
+        object.name = elm.name !== void ? elm.name : "edit" + numLinks;
+		var of = object.font;
+		var lf = font;
+		of.face   = (elm.fontface   !== void) ? elm.fontface   : lf.face;
+		of.angle  = (elm.fontangle  !== void) ? elm.fontangle  : lf.angle;
+		of.bold   = (elm.fontbold   !== void) ? elm.fontbold   : lf.bold;
+		of.italic = (elm.fontitalic !== void) ? elm.fontitalic : lf.italic;
+		of.height = (elm.fontheight !== void) ? elm.fontheight : lf.height;
+		object.linkNum = numLinks;
+		object.absolute = elm.absolute if(!isBlank(elm.absolute));
+		object.text = Scripts.eval(elm.exp);
+        object.exp = elm.exp;
+        object.antialiased = antialiased;
+		object.color = elm.bgcolor if elm.bgcolor !== void; // color でない事に注意
+		object.textColor = elm.color if elm.color !== void; // textColor でないことに注意
+		object.maxChars = elm.maxchars if elm.maxchars !== void;
+		object.bgOpacity = elm.opacity if elm.opacity !== void;
+		object.noborder = elm.noborder if elm.noborder !== void;
+		var ox = 0, oy = 0;
+		ox = +elm.textox if (elm.textox !== void);
+		oy = +elm.textoy if (elm.textoy !== void);
+		object.setDrawTextOffset(ox, oy) if (ox != 0 || oy != 0);
+		var len = elm.length === void ? 200: +elm.length;
+		object.setPos(+elm.x, +elm.y);
+		if(vertical)
+		{
+			object.height = len;
+			object.width = lf.height + 6;
+		}
+		else
+		{
+			object.width = len;
+			object.height = lf.height + 6;
+		}
+		object.visible = (elm.visible !== void) ? elm.visible : true;
+	
+		links[numLinks] = %[type :ltEdit,exp :	exp,object :object];
+		 names[object.name] = object;
+		numLinks ++;
+		focusable = true;
+		setSelProcessLock(false); // 選択ロック解除
+        //comp.setSelProcessLock(false); // 選択ロック解除
+	}
+
+	function addCheckBox(elm)
+	{
+		elm.type = ltCheckBox;
+		_storeArr.push(elm);
+		var object = new LinkCheckBoxLayer(window, this, vertical);
+        object.name = elm.name !== void ? elm.name : "check" + numLinks;
+        object.linkNum = numLinks;
+		object.absolute = elm.absolute if(!isBlank(elm.absolute));
+		object.vertical = vertical;
+		object.checked = Scripts.eval(elm.name);
+		object.exp = elm.name;
+        object.change = elm.onchange if elm.onchange !== void;
+        object.color = elm.bgcolor if elm.bgcolor !== void; // color でない事に注意
+		object.glyphColor = elm.color if elm.color !== void; // glyphColor でないことに注意
+		object.bgOpacity = elm.opacity if elm.opacity !== void;
+
+		object.setPos(+elm.x, +elm.y);
+		object.visible = (elm.visible !== void) ? elm.visible : true;
+
+		links[numLinks] = %[type :ltCheckBox,exp :elm.name,object :object];
+		names[object.name] = object;
+		numLinks ++;
+		focusable = true;
+		setSelProcessLock(false); // 選択ロック解除
+        //comp.setSelProcessLock(false); // 選択ロック解除
+	}
+
+	function addSlider(elm)
+	{
+		elm.type = ltSlider;
+		_storeArr.push(elm);
+		var vert = elm.vertical !== void ? +elm.vertical : false;
+        var object = new LinkSliderLayer(window, this, vert);
+		object.name = elm.name !== void ? elm.name : "slider" + numLinks;
+        object.linkNum = numLinks;
+		object.absolute = elm.absolute if(!isBlank(elm.absolute));
+        object.exp     = elm.name;
+		object.onclick = createSoundExpression(elm.exp, elm.clickse, elm.clicksebuf);
+		object.onenter = createSoundExpression(elm.onenter, elm.enterse, elm.entersebuf);
+		object.onleave = createSoundExpression(elm.onleave, elm.leavese, elm.leavesebuf);
+        object.color = elm.bgcolor if elm.bgcolor !== void; // color でない事に注意
+        object.bgOpacity = elm.opacity if elm.opacity !== void;
+        object.min = +elm.min if elm.min !== void;
+        object.max = +elm.max if elm.max !== void;
+		object.step = +elm.step if elm.step !== void;
+        object.nohilight = elm.nohilight if elm.nohilight !== void;
+		object.jumpMode = elm.jumpmode if elm.jumpmode !== void;
+        if (elm.value !== void) {
+            object.position = +Scripts.eval(elm.value);
+            object.change = elm.value;
+        } else {
+            object.position = +elm.position if elm.position !== void;
+			object.changefunc = elm.onchangefunc if elm.onchangefunc !== void;
+            object.change = elm.onchange if elm.onchange !== void;
+        }
+
+        object.changese = createSoundExpression(void, elm.changese, elm.changesebuf);
+        
+		if (elm.uistates !== void) {
+            object.loadUIInfo(elm); 
+			object.uiname = elm.uiname;
+       	} else {
+			// ベースの指定
+			if (elm.base !== void) {
+				object.loadBase(elm.base);
+			} else {
+				object.width   = elm.width  === void ? 200 : +elm.width;
+				object.height  = elm.height === void ? 30  : +elm.height;
+			}
+			// タブの指定
+			if (elm.normal !== void) {
+				object.loadTabs(elm.normal, elm.over, elm.on);
+			} else if (elm.tab !== void) {
+				object.loadTab(elm.tab);
+			}
+	   	}
+		object.setPos(+elm.x, +elm.y);
+        object.visible = (elm.visible !== void) ? elm.visible : true;
+
+        links[numLinks] = %[type :ltSlider,exp :elm.name,object :object];
+        numLinks ++;
+        focusable = true;
+		names[object.name] = object;
+        setSelProcessLock(false); // 選択ロック解除
+        //comp.setSelProcessLock(false); // 選択ロック解除
+	}
+
+	function commit()
+	{
+		// フォーム要素の内容をコミット
+		var lks = links;
+		for(var i = 0; i < numLinks; i++)
+		{
+			var item = lks[i];
+			var type = item.type;
+            if(type == ltEdit || type == ltCheckBox || type == ltSlider) item.object.commit();
+		}
+	}
+
+	
+	function setSelProcessLock(b)//防止控件被连点，选择后无法再次点击
+	{
+		// 選択のロックを設定
+		// 選択のロックを行うのは、いったん選択肢を選択したら
+		// 他の選択肢を選択できないようにするため
+		if(selProcessLock != b)
+		{
+			selProcessLock = b;
+			/*var lks = links;
+			for(var i = 0; i < numLinks; i++)
+			{
+				var item = lks[i];
+				var type = item.type;
+                if(type == ltEdit || type == ltCheckBox || type == ltSlider || type == ltButton)
+				 	item.object.enabled = !b;
+			}*/
+		}
+	}
+
+	function storeSelProcessLock()
+	{
+		// 右クリックサブルーチンに入る前に呼ばれ、
+		// 現在の selProcessLock の状態を退避する
+		storedSelProcessLock = selProcessLock;
+	}
+
+	function restoreSelProcessLock()
+	{
+		// 右クリックルーチンから抜けるときに呼ばれ、
+		// 右クリックルーチンに入る前の selProcessLock の状態を
+		// 取り戻す
+		setSelProcessLock(storedSelProcessLock);
+	}
+
+
+	function setFocusToLink(n, force = false)
+	{
+		// マウスカーソルを リンク番号 n の位置に移動させたり、  把鼠标移动到聚焦位置，类似于履历层
+		// フォーカスを与えたりする
+		// force=false の場合はキーボード操作が行われた場合のみ
+		// マウスカーソルを移動するが、force=true のばあいはキーボードの状態に
+		// 関わらずマウスカーソルを移動し、フォーカスを設定する
+		var linkn = links[n];
+		var obj = linkn.object;
+		if(linkn === void) return;
+		
+		var x = obj.left+obj.width/2,y = obj.top+obj.height/2;
+
+		// キーボードで操作が行われた場合にのみカーソルを
+		// 移動させるため、該当するキーが押されているかチェックを行う
+		var sgks = window.getKeyState;
+		var process = force || sgks(VK_LEFT) || sgks(VK_UP) || sgks(VK_RIGHT) || sgks(VK_DOWN) || sgks(VK_TAB);
+		if(process)
+		{
+			cursorX = x;
+			cursorY = y;
+			onMouseMove(x, y);
+			if(force) keyLink = n; // 一応再設定
+		}
+		if(linkn.type == ltEdit || linkn.type == ltCheckBox || linkn.type == ltSlider || linkn.type == ltButton)
+		{
+			if(force) obj.focus();
+			return obj;
+		}
+		if(force) focus();
+		return void;
+	}
+
+	function findPrevFocusable(control, layer)//控件类搜索焦点时会调用此方法，先检查能否转移焦点到其他控件上，不能则用内置方法
+	{
+		if(control.linkNum != 0) return this; else return prevFocusable;
+	}
+
+	function findNextFocusable(control, layer)
+	{
+		if(control.linkNum != numLinks -1) return this; else return layer;
+	}
+
+	/** 
+	* @description: 	获取可聚焦的空间
+	* @param link	当前的链接
+	* @param direction	方向
+	* @return 		应该聚焦的控件号
+	*/	
+	function checkFocus(link, direction) {
+        var firstLink = link;
+        do {
+            var target = links[link].object;
+            if (!isBlank(target) && target.visible && target.enabled && target.focusable) {
+                return link;
+            }
+            if (direction > 0) {
+                link++;
+                if (link >= numLinks) {
+                    link = 0;
+                }
+            } else {
+                link--;
+                if (link < 0) {
+                    link = numLinks - 1;
+                }
+            }
+        } while (link != firstLink);
+        return link;
+    }
+
+    function tabPrev() {
+		keyLink = lastLink if (keyLink < 0 && lastLink >= 0);
+		if(keyLink == -1 || keyLink == 0) keyLink = numLinks - 1;
+		else keyLink--;
+		keyLink = checkFocus(keyLink, -1);
+		var obj = setFocusToLink(keyLink);
+		if(obj !== void) obj.focus();
+    }
+    
+    function tabNext() {
+		keyLink = lastLink if (keyLink < 0 && lastLink >= 0);
+		if(keyLink == -1 || keyLink == numLinks -1) keyLink = 0;
+		else keyLink ++;
+		keyLink = checkFocus(keyLink, 1);
+		var obj = setFocusToLink(keyLink);
+		if(obj !== void) obj.focus();
+    }
+
+	function onBlur(layer){
+		if(!isBlank(layer,"linkNum") && layer.parent == this){
+			keyLink = layer.linkNum;
+		}
+		else{
+			keyLink = -1;
+		}
+	}
+	function onInactive(){}
+	function onActive(){}
+	function onBeforeFocus(layer, blured, direction)	// 获得焦点时，将焦点转移给控件
+	{
+		// フォーカスを得る前に呼ばれる
+		// 最初のリンクまでカーソルを移動させる
+		if(!selProcessLock && numLinks)
+		{
+			// キーボードで操作が行われた場合にのみカーソルを		使用键盘操作时移动鼠标的检查
+			// 移動させるため、該当するキーが押されているかチェックを行う
+			var sgks = window.getKeyState;
+			var process = sgks(VK_LEFT) || sgks(VK_UP) || sgks(VK_RIGHT) ||
+				sgks(VK_DOWN) || sgks(VK_TAB);
+
+			if(process && (blured == null || blured.parent != this)) //焦点从其他图层移动过来
+			{
+				if(direction)
+				{
+					// forward
+					keyLink = 0;
+				}
+				else
+				{
+					// backward
+					keyLink = numLinks-1;
+				}
+				keyLink = checkFocus(keyLink, direction ? 1 : -1);
+				var obj = setFocusToLink(keyLink);
+				if(obj !== void)
+				{
+					super.onBeforeFocus(obj, blured, direction);
+					return;
+				}
+			}
+
+			if(blured != null && blured.parent == this) //焦点在本图层的控件内移动
+			{
+				if(direction)
+				{
+					if(keyLink == -1 || keyLink == numLinks -1)
+						keyLink = 0;
+					else
+						keyLink++;
+				}
+				else
+				{
+					if(keyLink == -1 || keyLink == 0)
+						keyLink = numLinks - 1;
+					else
+						keyLink--;
+				}
+				keyLink = checkFocus(keyLink, direction ? 1 : -1);
+				var obj = setFocusToLink(keyLink);
+				if(obj !== void)
+				{
+					super.onBeforeFocus(obj, blured, direction);
+					return;
+				}
+			}
+		}
+
+		super.onBeforeFocus(...);
+	}
+
+	function onLinkTrigger(num,data){	
+	}
+
+	/**
+	* @describe	任何子类判断击中则击中
+	*/
+	function onHitTest(x,y,b){    
+		var res = false;
+		if (!eventTransparent) res = true; //事件不透过则命中
+		else if (selProcessLock) res = false; // 透過
+		return super.onHitTest(x,y,b||res);
+	}
+	function onMouseMove(x, y)
+	{
+		if(selProcessLock)
+		{
+			// 選択ロック中は処理を行わない
+			if(cursor == window.cursorPointed) cursor = crDefault; // なんとなく???
+		}
+
+	}
+	function onMouseDown(x, y,button){
+		// 右クリックは素通しする
+        if (button == mbRight) {
+            window.onPrimaryRightClick();
+        }
+	}
+
+	function onKeyDown(key, shift, process){
+		// キーが押された
+		if(window.preProcessKeys(key, shift)) return;//hook到了 跳过
+		if(!focusable || !numLinks ) { return super.onKeyDown(...); }	//无法获得焦点就跳过
+
+		if(!selProcessLock && ((key == VK_UP && !(shift & ssShift)) ||
+			(key == VK_TAB && (shift & ssShift))))		// 能切换焦点则切换
+		{
+			// releaseCapture();
+            tabPrev();
+		}
+		else if(!selProcessLock && (key == VK_DOWN  || (key == VK_TAB && !(shift & ssShift))))
+		{
+			// releaseCapture();
+            tabNext();
+		}
+		else	window.processKeys(key, shift); 
+	}
+
+	function setCompLayer(lay) { comp = lay; }
+	function assignComp()//复制里层的内容
+	{
+		// 対になるレイヤの内容をコピー
+        assign(comp,true);
+	}
+	/** 
+	* @description: 	结束渐变后的处理，无视 withchildren  exchange,总会复制子层及复制状态
+	* @param src	源图层
+	* @return 	void
+	*/
+	function atEndOfTransition(src){
+		super.atEndOfTransition(...);
+		if(src==null)return;
+		assign(src,true);
+		exchangeInfo();
+		window.swapUiLayer(di);
+	}
+	function assignTransSrc(){
+		assign(comp, true);
+	}
+	function assign(src, copyvisiblestate){
+		// このレイヤ自身の画像、位置、透明度などのコピー
+		super.assign(src);
+		if(copyvisiblestate)
+			assignVisibleState(src); // assignImages は可視?不可視などの情報はコピーしないため
+		focusable = src.focusable;
+        eventTransparent = src.eventTransparent;
+		// links のコピー
+		{
+			invalidateLinkObjects(); // 一応オブジェクトはすべて無効化
+			var tl = links, sl = src.links;
+			tl.count = sl.count;
+			for(var i = 0; i<sl.count; i++)
+			{
+				if(sl[i] === void) continue;
+				var tl_d = (tl[i] = %[]);
+				var sl_d = sl[i];
+				(Dictionary.assign incontextof tl_d)(sl_d);
+
+				// タイプに従って
+				var type = tl_d.type;
+				if(type == ltButton || type == ltLayer)
+				{
+					// ボタン
+					var sl_d_object = sl_d.object;
+					var object = new LinkButtonLayer(window, this);
+						// object は再作成
+					object.assign(sl_d_object);
+					object.assignVisibleState(sl_d_object);
+					object.absolute = sl_d_object.absolute;
+					tl_d.object = object;
+					names[object.name] = object;
+				}
+				else if(type == ltEdit)
+				{
+					// 単一行エディット
+					var sl_d_object = sl_d.object;
+					var object = new LinkEditLayer(window, this);
+						// object は再作成
+					object.assign(sl_d_object);
+					object.assignVisibleState(sl_d_object);
+					object.absolute = sl_d_object.absolute;
+					tl_d.object = object;
+					names[object.name] = object;
+				}
+				else if(type == ltCheckBox)
+				{
+					// チェックボックス
+					var sl_d_object = sl_d.object;
+					var object = new LinkCheckBoxLayer(window, this);
+						// object は再作成
+					object.assign(sl_d_object);
+					object.assignVisibleState(sl_d_object);
+					object.absolute = sl_d_object.absolute;
+					tl_d.object = object;
+					names[object.name] = object;
+                }else if(type == ltSlider)
+				{
+					// チェックボックス
+					var sl_d_object = sl_d.object;
+					var object = new LinkSliderLayer(window, this);
+						// object は再作成
+					object.assign(sl_d_object);
+					object.assignVisibleState(sl_d_object);
+					object.absolute = sl_d_object.absolute;
+					tl_d.object = object;
+					names[object.name] = object;
+                }
+			}
+		}
+		// そのほか
+		lastLink = keyLink = -1;
+		imageModified = true;
+		frameGraphic = src.frameGraphic;
+		frameKey = src.frameKey;
+		frameColor = src.frameColor;
+		frameOpacity = src.frameOpacity;
+		numLinks = src.numLinks;
+		selProcessLock = src.selProcessLock;
+	}
+	function store(){
+		var dic = super.store();
+		dic.frameGraphic = frameGraphic;
+		dic.frameKey = frameKey;
+		dic.frameColor = frameColor;
+		dic.frameOpacity = frameOpacity;
+  		dic.eventTransparent = eventTransparent;
+		dic.links =[];
+		dic.links.assignStruct(_storeArr);
+		return dic;
+	}
+	function restore(dic){
+		super.restore(dic);
+		frameGraphic = dic.frameGraphic if dic.frameGraphic !== void;
+		frameKey = dic.frameKey if dic.frameKey !== void;
+		frameColor = dic.frameColor if dic.frameColor !== void;
+		frameOpacity = dic.frameOpacity if dic.frameOpacity !== void;
+		eventTransparent = dic.eventTransparent if dic.eventTransparent !== void;
+		imageModified = true;
+		clearLayer();
+		for(var i=0;i<dic.links.count;i++)
+		{
+			var item = dic.links[i];
+			switch(item.type){
+				case ltLayer: addLayer(item);break;
+				case ltButton: addButton(item); break;
+				case ltCheckBox: addCheckBox(item);break;
+				case ltEdit: addEdit(item);break;
+				case ltSlider: addSlider(item);break;
+			}
+		}
+	}
+}

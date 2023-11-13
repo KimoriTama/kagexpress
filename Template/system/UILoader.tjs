@@ -1,0 +1,843 @@
+//
+// UI ロード処理用専用クラス  ui读入专用的类
+//
+
+// csv パーサプラグインの読み込み
+if (global.CSVParser === void) {
+    Plugins.link("csvParser.dll");
+}
+
+var buttonStateNames = %[ normal:true, over:true, on:true, off:true ];
+
+/**
+ * UI定義ファイル読み出し用パーサ
+ * ui的class类型有如下：
+ * copy base layer radio part cref
+ * 可使用的指令：
+ * type:type,name,class,x,y,width,height  （指定类型，坐标和大小）,base 的x y不会用于设置位置，仅会用于参照位置
+ * file:file,name,storage,ox,oy,w,h,stateName[,(其他类型:subState/radio:groupName)]		（指定文件，状态和偏移量）
+ * file(copy):file,name,storage,ox,oy,w,h,copy,subref		copy对象可也以在这里指定复制的对象和组名称
+ * func:func,name,key,value[,key,value ....]		指定属性，把value复制给key属性
+ * part:part,name,key,part[,part1,part2 ....]		增加部件(追加到数组的part属性中)
+ * cref:cref,name,ref class,[ref class2,ref class3...]		以自身为参数，重设ref class 的uistate 高度、状态、大小等参数
+ * tpov:tpov,name,class,true/false,layer			重设类型(class)，如果为layer类型还会重设layer
+ * copy:copy,name,copy,subref,diff,base				复制引用对象的宽高，坐标使用复制对象减去base对象加上diff对象，复制对象在这里仅会复制大小和坐标，图像文件不会复制
+ * rgrp:rgrp,groupName,obj1[,obj2..]				设置组名称
+ * grcp:grcp,name,prefix,part,base[,+]				复制part的全部组件，如果指定'+'则类型改为cref
+ * ordr:ordr,obj1[,obj2...]
+ * stat:
+ * eval:eval,name,type(call,exp,..)	 对于 rect pos 等类型 之后为 result名,x属性名,y属性名,width属性名，height属性名,对于call 	
+ * eval可使用的name包括 pre(加工elm)，names(加工names),func(加工result),elm 加工参数（这里会用到base），base 最后对层的处理
+ * result中的对象的基本属性：
+ * name :名称
+ * class ：类型
+ * uistate:
+ * copy: 复制的对象 （可由copy及file设置）
+ * subref:	用于 radio 类型，组名称会设置为此
+ * cref： true 是否被参照
+ * layer: 只有 tpov 可以设置
+ * groupName: 组名  
+ */
+class UIListParser extends CSVParser {
+
+    // パース結果格納用
+    var result;		//记录名称对应的信息
+    var names;		//记录名称
+	var evals;
+	var order;
+    var check;		//记录是否成功
+
+	function UIListParser() {
+        super.CSVParser(...);
+        clear();
+    }
+	//清理此类的存储 构造时也会调用
+    function clear() {
+        result = %[];
+        names = [];
+		evals = %[];
+		order = void;
+    }
+	function finalize(){
+		clear();
+	}
+
+	function parseStorage(filename,utf8=true) {
+		check = false;
+		super.parseStorage(...);
+		if (check) return result;
+
+		// １行も読まれなかったらとりあえずエンコードを変えて読み直し  如果一行都没读，先换个编码重新读
+		super.parseStorage(filename, !utf8);
+		if (check) return result;
+
+		// それでもダメだったらArrayで読み直す  还不行的话作为文件从中读入array
+		var temp = [];
+		var sep = (Storages.extractStorageExt(filename).toLowerCase() == ".txt") ? "\t" : ",";//得到分隔符
+		temp.load(filename);
+		for (var i = 0; i < temp.count; i++) {
+			var line = [];
+			line.split(sep, temp[i]);
+			doLine(line, i+1) if (line.count > 0);
+		}
+		return result;
+	}
+
+
+    /**
+     * 行毎に呼び出される
+     * @param columns カラムデータ(Array)	各列的数组
+     * @param lineNo 論理行番号(1～)
+     */
+    function doLine(_columns, lineNo) {
+		if (isComment(_columns)) return;
+		var columns = [];
+		for (var i = 0; i < _columns.count; i++) columns[i] = _columns[i].trim();
+
+		var type = columns[0];
+		var name = columns[1];
+		if (type == "eval") {
+			check = true;
+			return doEvals(name, columns, _columns);
+		} else if (type == "rgrp") {
+			check = true;
+			return doRGrp(name, columns);
+		}
+		var info = getInfo(name, true);
+		switch (type) {
+		case "type": doType(info, columns); break;
+		case "tpov": doTpOv(info, columns); break;
+		case "file": doFile(info, columns); break;
+		case "func": doFunc(info, columns); break;
+		case "part": doPart(info, columns); break;
+		case "copy": doCopy(info, columns); break;
+		case "grcp": doGrcp(info, columns); break;
+		case "cref": doCRef(info, columns); break;
+		case "ordr": doOrdr(info, columns); break;
+		case "stat": doStat(info, columns); break;
+		default: return;
+		}
+		check = true;
+	}
+	// コメント行かどうか   判断是否为注释行
+	function isComment(columns) {
+		return (isBlank(columns) || isBlank(columns[0]) ||columns[0].charAt(0) === '#');
+	}
+
+	/** 
+	* @description: 	获取result,如果指定创建则创建对象的类型信息并填充name uiname uistates 信息
+	* @param name		对象名称
+	* @param create		是否进行创建
+	* @param pos=-1		指定对象在结果中的位置
+	* @return 		result中的对象信息
+	*/
+	function getInfo(name, create, pos=-1) {
+		var info = result[name];
+		if (isBlank(info) && create) {
+			info = %[];
+			info.name = name;
+			info.uiname = name;
+			info.uistates = %[];
+			if (pos < 0) names.add(name);
+			else names.insert(pos, name);
+			result[name] = info;
+		}
+		return info;
+	}
+
+	/** 
+	* @description: 	处理type类型的数据，为其指定类型，基本格式为: type,name,class,x,y,width,height
+	* @param info		result中的对象信息
+	* @param columns	行数据
+	* @return 		void
+	*/
+	function doType(info, columns) {
+		info.class  = columns[2];
+		info.x      = +columns[3];
+		info.y      = +columns[4];
+		info.width  = +columns[5];
+		info.height = +columns[6];
+	}
+	/** 
+	* @description: 处理tpov类型的数据，重新设置类和layer(仅当类型为layer时),基本格式:tpov,name,class,true/false,layer
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doTpOv(info, columns) {	
+		//参数3代表是否强制设置,否则仅当为空时才会强制设置
+		if(isBlank(info.class) || columns[3]){
+			info.class  = columns[2];
+			info.layer  = columns[4] if (info.class == "layer" && !isBlank(columns[4]));
+		}
+	}
+	/** 
+	* @description: 处理copy类型的数据，复制引用对象的宽高，坐标使用复制对象减去base对象加上diff对象,不会复制uistate
+	* (某ui内部的按钮会用到,diff 为外层的ui base 和copy为被复制的外层和内层ui)
+	*  基本格式为 copy,name,copy,subref,diff,base
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doCopy(info, columns) {
+		info.class  = "copy";
+		info.copy   = columns[2];
+		info.subref = columns[3];
+		// 座標変更用
+		var copy = info.copy,  cinfo;
+		var diff = columns[4], dinfo;
+		var base = columns[5], binfo;
+		if (copy != "" && (cinfo = result[copy]) !== void) {
+			info.width = cinfo.width;				//	复制宽度和高度
+			info.height = cinfo.height;
+			var x = cinfo.x, y = cinfo.y;
+			if (diff != "" && (dinfo = result[diff]) !== void &&
+				base != "" && (binfo = result[base]) !== void) {
+				x = (x - binfo.x) + dinfo.x;
+				y = (y - binfo.y) + dinfo.y;
+			}
+			info.x = x;
+			info.y = y;
+		}
+	}
+
+	/** 
+	* @description: 处理parts 类型的数据，为其指定部件(part属性),part类型没有其他作用，专门用于记录某part有哪些
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doPart(info, columns) {
+		if (isBlank(info.class))
+		   info.class = "part";
+		else if (info.class !== "part") 
+			throw new Exception("An entity exists with the part name:" + info.name);
+		info.part = [] if (isBlank(info.part));
+		var part = info.part;
+		for (var i=2; i<columns.count; i++)
+			if (!isBlank(columns[i]))
+				part.add(columns[i]);
+	}
+
+	/** 
+	* @description: 处理grcp类型的数据，把part对象的的全部部件逐个生成复制,复制生成的对象前缀为prefix,base为参照的对象 基本格式为 grcp,name,prefix,part,base
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doGrcp(info, columns) {
+		var prefix = columns[2];
+		var part = columns[3];
+		var base = columns[4];
+		if (isBlank(part) || isBlank(result([part])) || result[part].class != "part") {
+			dm("The specified part does not exist:" + part);
+			return;
+		}
+		var part = result[part].part;
+		var pos = names.find(info.name);
+		for (var i=part.count-1; i>=0; --i) {
+			if (isBlank(part[i])) continue;
+			var name = prefix + part[i];
+			doCopy(getInfo(name, true, pos), [ "copy", name, part[i], /*subref*/void, info.name, base ]);
+		}
+		info.class = "cref" if (columns[5]!="+");	  //改为此类型时，不会处理此部件
+	}
+
+	/** 
+	* @description: 	 设置ui某状态时的属性，包括文件名、偏移量和大小
+	* @param stateName	指定ui具体的状态
+	* @param info		result中的对象
+	* @param columns	行信息
+	* @return 	是否成功,如果不指定具体的ui状态则失败(layer类型的ui除外)
+	*/
+	function setState(stateName, info, columns) {
+		if (info.class == "layer") {
+			stateName = (string)null if (stateName == "");	// (object 0x00000000:0x00000000)  <-----  一个长这样的字符串
+			info.layer = stateName;		// 设置的layer属性用于决定normal时的state
+		}
+		if (stateName == "") return false;
+		// 获取uistate	不存在则创建
+		var state = info.uistates[stateName];
+		if (isBlank(state)) {
+			state = %[];
+			info.uistates[stateName] = state;
+		}
+		with (state) {
+			.storage = columns[2];
+			.ox = +columns[3];		//偏移量指的是图片距离按钮左边的距离
+			.oy = +columns[4];
+			.w  = +columns[5];
+			.h  = +columns[6];
+		}
+		return true;
+	}
+
+	/** 
+	* @description: 处理file类型的数据，为其指定文件,如果类型为copy则不会设置具体的ui状态，且参数也不一样,对于base来说uistate并没有什么用，仅设置storage就好了
+	* 基本格式为: file,name,storage,ox,oy,w,h,stateName
+	* copy格式为: file,name,storage,ox,oy,w,h,copy,subref
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doFile(info, columns) {
+		switch (info.class) {
+		case "copy":
+			info.copy   = columns[7];
+			info.subref = columns[8];
+			break;
+		case "base":
+			info.storage  = columns[2]; //base类型会直接设置storage
+			break;
+		default:
+			var stateName = columns[7], isrect = (stateName == "rect");
+			//	如果第9位还有参数指定，则尝试作为stateName 拼接后的名称,如果为radio 用此来设置组名groupName
+			for (var i=8;i<columns.count;i++) {
+				var state = columns[i];
+				if (state == "") continue;
+				if (buttonStateNames[state] !== void) {
+					stateName += "_";
+					stateName += state;
+				} else if (info.class == "radio") { //如果radio类型会用state设置组名称
+					info.groupName = state;
+				}
+				isrect |= (state == "rect");
+			}
+			if (isrect) columns[2] = "";	// 对于rect 的状态，不存在storage		todo 考虑逻辑
+			setState(stateName, info, columns);
+			break;
+		}
+	}
+
+
+	/** 
+	* @description: 处理stat类型的数据，复制uistate,把src复制到dest的状态中 基本格式 stat,name,src,dest
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doStat(info, columns) {
+		var target =  columns[1], ui;
+		if (target == "" || result[target] === void || (ui = result[target].uistates) === void) {
+			dm("stat: The specified target does not exist:" + target) if (target != "");
+			return;
+		}
+		if (columns[2] != "" && ui[columns[2]] === void) {
+			dm("stat:The specified stat does not exist:" + columns[2]);
+			return;
+		}
+		if (columns[3] == "") {
+			dm("stat:Please specify the state to overwrite.:" + target);
+			return;
+		}
+		ui[columns[3]] = ui[columns[2]];
+	}
+
+	/** 
+	* @description: 处理rgrp类型的数据，为其指定组名称,基本格式为 rgrp,groupName,obj1,obj2
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doRGrp(key, columns) {
+		for (var i = 2; i < columns.count; i++) {
+			var target = columns[i];
+			if (isBlank(result,target)) {
+				dm("The specified rgrp does not exist:" + target) ;
+				continue;
+			}
+			result[target].groupName = key;
+		}
+	}
+
+	/** 
+	* @description: 处理cref类型的数据，以自身为参照，重新设置目标的uistate 高度、状态、大小等参数，基本格式 cref,name,ref class,[ref class2,ref class3...]
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doCRef(info, columns) {
+		for (var i = 2; i < columns.count; i++) {
+			var target = columns[i];
+			if (isBlank(result,target)) {
+				dm("The specified cref does not exist:" + target);
+				continue;
+			}
+			target = result[target];
+			var  x, y, w, h;
+			with (target) x =.x, y =.y, w=.width, h=.height;
+			with (info)   x-=.x, y-=.y;
+			target.cref = true;	// 设置目标被参照属性为真
+			var context = %[x:x,y:y,w:w,h:h];
+			foreach(info.uistates,function(name,state,dic,target){// 循环参照目标的 uistate，设置名称和值
+				if(isBlank(name) || isBlank(state))return;
+				target.uistates[name] =					// 需要复制的高宽:cw ch 复制目标的起始坐标:cx,cy
+					%[  storage: state.storage,
+					ox: 0, oy: 0, w:w, h:h, cw:w, ch:h,
+					cx:x-state.ox, cy:y-state.oy ];
+			} incontextof context,target);
+		}
+	}
+
+	/** 
+	* @description: 处理ordr类型的数据，指定顺序，基本格式为 ordr,obj1[,obj2]
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doOrdr(info, columns) {
+		order = [] if (order === void);
+		for (var i=1; i<columns.count; i++)
+			if (!isBlank(columns[i])) order.add(columns[i]);
+	}
+
+
+
+	/** 
+	* @description: 处理func类型的数据，为其属性设置值
+	* @param info	result中的对象信息
+	* @param columns	行数据
+	* @return void
+	*/
+	function doFunc(info, columns) {
+		for (var i=2; i<columns.count; i+=2) {
+			var tag = columns[i];
+			var val = columns[i+1];
+			val = true if (isBlank(val));
+			if(isBlank(tag))return;
+			try {
+				info[tag] = val;
+			} catch(e) {
+				dm("The specified process cannot be evaluated.:" + val);
+			}
+		}
+	}
+
+	/** 
+	* @description: 处理eval类型	格式为	eval,name,type(call,exp,..)
+	* 将结果存入evals的键为name的数组中	
+	* @param name	对象的名称
+	* @param c1	trim处理过的数据
+	* @param c2	未做trim处理的原来的数据
+	* @return void
+	*/
+	function doEvals(name, c1, c2) {
+		var tag = c1[2];
+		var sel = (tag == "exp") ? c2 : c1;
+		sel.erase(0);
+		sel.erase(0);
+		sel[0] = tag;
+		evals[name] = [] if (evals[name] === void);
+		evals[name].add(sel);
+	}
+};
+/** 
+ * @description: 	读取ui定义文件
+ * @param elm.storage 	文件名称,可以不带文件 后缀，对于txt文件分隔符为\t 对于csv文件，分隔符为,
+ *  文件名称,可以不带文件 后缀，对于txt文件分隔符为\t 对于csv文件，分隔符为,
+ *  可以以字符串指定单个文件，也可以以数组指定多个文件
+ * @param elm.func 会同时读取同文件名后缀为func 的文件作为行为定义文件读入,或者该参数指定后缀名
+ * @param elm.exts 复数文件下指定的文件名
+ * @return 
+ */
+function uiloadParse(elm)
+{
+	var separator = #',';
+	var baseName = elm.storage;
+	var parser;
+
+	if (typeof baseName == "String") {
+		// 単一ファイル方式  单文件方式
+		if (!Storages.isExistentStorage(baseName)) {
+			if (Storages.isExistentStorage(baseName + ".csv")) {
+				baseName += ".csv";
+			} else if (Storages.isExistentStorage(baseName + ".txt")) {
+				baseName += ".txt";
+				separator = #'\t';
+			} else {
+				throw new Exception("can't find ui define file :" + baseName);
+			}
+		}
+		parser = new UIListParser(null, separator);
+		parser.parseStorage(baseName);
+
+		// 参数中不指定func则以同名的.func文件作为输入
+		var funcName = (elm.func !== void) ? elm.func : Storages.chopStorageExt(baseName) + ".func";
+		if (!Storages.isExistentStorage(funcName)) {
+			if (Storages.isExistentStorage(funcName + ".func")) {
+				funcName += ".func";
+			}
+		}
+		if (Storages.isExistentStorage(funcName)) {
+			parser.parseStorage(funcName);
+		}
+	} else if ( baseName instanceof "Array") {
+		// 複数ファイル方式  复数文件方式
+		switch (typeof elm.separator) {
+			case "String":  separator = #(elm.separator); break;
+			case "Integer": separator =   elm.separator;  break;
+		}
+		// 検索拡張子  搜索后缀名
+		var exts = [ "csv", "func" ];
+		if (!isBlank(elm.exts) && typeof elm.exts instanceof "Array") exts.assign(elm.exts);
+
+		var list = [];
+		list.assign(baseName);
+
+		parser = new UIListParser(null, separator);
+		for (var i = 0; i < list.count; i++) {
+			var item = list[i];
+			if (Storages.isExistentStorage(item)) {
+				parser.parseStorage(item);
+			} else for (var j = 0; j < exts.count; j++) {
+				var file = getExistFileNameAutoExtFill(item, exts[j]);
+				if (!isBlank(file)) parser.parseStorage(file);
+			}
+		}
+	}
+	else throw new Exception("the argumes is not correct!");
+	with (parser) 
+		return %[ names:.names, result:.result, evals:.evals, order:.order ];
+}
+
+/** 
+ * @description: 
+ * @param dic	对象字典
+ * @param elm	返回结果的地方
+ * @param name	对象名称
+ * @return 		需要复制的对象
+ */
+function uiloadCopyElement(dic, elm, name)
+{
+	var target, ret;
+	try { ret = target = dic[name]; } catch {}
+	if (target === void) {
+		dm("the object to copy is not exists:" + name);
+		return;
+	}
+	if (target.class == "copy") {
+		ret = uiloadCopyElement(dic, elm, target.copy);
+		if (ret === void) return;
+	}
+	(global.Dictionary.assign incontextof elm)(target, false);
+	return ret;
+}
+
+// part中にサブpartを含む場合は展開する  将dic中的part指定的名称的键返回， part中含有子part的情况下展开返回,获取所有part，可用part获取，也可直接用所有的按钮名字符串获取
+function uiloadPartExtract(dic, part)
+{
+	part = part.split(",",,true) if (typeof part == "String");
+	if (typeof part != "Object" || !(part instanceof "Array")) return [];
+	var result = [], append = [];
+	for (var i = 0; i < part.count; i++) {
+		var name = part[i];
+		if (typeof name == "String" && name != "") {
+			name = name.trim();
+			var item = (part[i] != "") ? dic[part[i]] : void;
+			if (item !== void) {
+				if (item.class != "part") result.push(name);	//类型不是part则将其放入结果数组
+				else {
+					var subpart = uiloadPartExtract(dic, item.part);	// 否则获取其part属性，分解该数组并放入结果数组
+					result.push(subpart*) if (typeof subpart == "Object");
+				}
+			}
+		}
+	}
+	return result;
+}
+//初始化layer 			(dic)就是result
+
+/** 
+ * @description: 为层对象加载ui信息
+ * @param layer		层对象
+ * @param names		ui部件列表
+ * @param dic		ui部件字典
+ * @param elm		参数
+ * @param table		对应方法集
+ * @param evals		记录的对应表达式
+ * @param order		加载顺序
+ * @return 
+ */
+function uiloadEntry(layer, names, dic, elm, table, evals, order)
+{
+	evals = %[] if (evals === void);
+
+	// elm 加工フック  elm 处理hook
+	uiloadEvals(elm, evals.pre, dic);
+
+	// 指定part削除動作			指定移除哪些部分
+	if (elm.partremove != "") {
+		var parts = uiloadPartExtract(dic, elm.partremove);
+		for (var i = parts.count-1; i >= 0 ; i--) //发现指定就移除
+			names.remove(parts[i], true);
+	}
+
+	// 指定part以外削除動作		指定不移除哪些部分
+	if (elm.partexcept != "") {
+		var parts = uiloadPartExtract(dic,   elm.partexcept);
+		if (parts.count > 0) {
+			for (var i = names.count-1; i >= 0; i--) 
+				if (parts.find(names[i]) < 0) names[i] = void;	//没发现指定就移除
+			names.remove(void, true);
+		}
+	}
+
+	// ordr 順序指定	放到最后
+	if (!isBlank(order)) {
+		var parts = uiloadPartExtract(dic, order);
+		for (var i = parts.count-1; i >= 0 ; i--) {
+			var name = parts[i];
+			if (names.find(name) >= 0) with (names){
+				.remove(name, true);
+				.push(name);
+			}
+		}
+	}
+
+	// names/dic加工フック
+	uiloadEvals(names, evals.names, dic);
+	uiloadEvals(dic,   evals.funcs, dic);	// 这个用的比较少,因为names是最终真正用到的
+
+	var basex = 0, basey = 0;
+
+	// 背景だけ特殊処理  特殊处理背景
+	var base;
+	for (var i=0; i<names.count; i++) {		// base 的处理仅仅是设置了位置
+		var value = dic[names[i]];
+		if (value !== void && value.class == "base") {
+			base = names[i];
+			uiloadEvals(elm, evals.elm, dic, base);
+			table.base(layer, base, value, elm);
+			basex = value.x;
+			basey = value.y;
+			break;
+		}
+	}
+	// 背景がなかったときの処理  无背景时的处理
+	if (base === void) {
+		uiloadEvals(elm, evals.elm, dic, base);
+		table.base(layer, base, %[ x:0, y:0, width:layer.parent.width, height:layer.parent.height, storage:"" ], elm);
+	}
+
+	var links = layer.numLinks;
+	var ncnt  = names.count;
+	for (var i = 0; i < ncnt; i++) {
+		var name  = names[i];
+		var value = (name != "") ? dic[name] : void;
+		if (value === void) continue;
+		switch (value.class) {
+		case void:
+			dm("warning:class is not assigned: " + name);
+			break;
+		case "cref":
+		case "base":
+		case "part":
+			break;
+		case "copy":		// 对于copy类型的ui， 基本会复制全部uistate(原来的slider的min之类也会保留)，之后x y w h再会覆盖上去
+			var temp = %[];
+			var target = uiloadCopyElement(dic, temp, value.copy);	//取出copy的对象,放入到temp中
+			if (target === void) break;
+			(global.Dictionary.assign incontextof temp)(value,  false);//并不消除原有内容,但会发生覆盖(即保留copy 对象原始的内容)
+			
+			temp.class = target.class;
+			temp.groupName = value.subref if (temp.class == "radio" && value.subref !== void);//radio时更改groupname
+			temp.uistates = target.uistates if (!value.cref);	//自身为非参照对象时,复制目标对象的全部state 
+			value = temp;
+			/* not break */
+		default:
+			value.x -= basex;		// 这里减去了相对于的x偏移量
+			value.y -= basey;
+			uiloadEvals(value,  evals["-"+value.name], dic, base);		// 如果专门为此ui注册了方法会先执行它 （-开头加上名称来注册）
+			value.absolute = links++;
+			var func = table[value.class];
+			if (func !== void) {
+				var target = func(layer, name, value, elm);
+				uiloadEvals(target, evals[value.name], dic, base) if (target !== void);	// 如果专门为此ui注册了方法，会在生成后在执行它 直接用名称注册
+			}
+			break;
+		}
+	}
+	// 我就不给你排序了，按理说添加进来的应该就是正确的顺序
+	uiloadEvals(layer, evals.base, dic, base);
+}
+// 用tag取出 result中的 ui的位置大小和偏移量，如果用 name.state 指定则会返回ui和其下uistate的位置大小 偏移量的相加
+function uiloadGetRect(tag, result) {
+	if (tag.indexOf(".") < 0) {
+		if (result[tag] === void) return void;
+		with (result[tag]) return %[x:.x, y:.y, w:.width, h:.height, ox:0, oy:0];
+	}
+	var div = tag.split(".");
+	var p = result[div[0]];
+	if (p === void) return void;
+	var s = p.uistates[div[1]];
+	if (s === void) return void;
+	return %[x:p.x + s.ox, y:p.y + s.oy, w:s.w, h:s.h, ox:s.ox, oy:s.oy];
+}
+// 设置target的位置和大小  参数： targeth指定目标层 rect指定 位置和高宽  brect指定参照的base层 xywh指定target的具体键名
+function uiloadSetRect(target, rect, brect, x, y, w, h) {
+	with (rect) {
+		if (brect !== void) {
+			.x -= brect.x;
+			.y -= brect.y;
+		}
+		target[x] = .x;
+		target[y] = .y;
+		if (w !== void) {
+			target[w] = .w;
+			target[h] = .h;
+		}
+	}
+}
+
+
+/** 
+ * @description: 	解析evals，并对目标对象执行一系列操作 
+ * @param target	加工的对象
+ * @param evals		evals参照
+ * @param result	部件的字典
+ * @param base		参照对象(可为空)
+ * prop类型:	eval,name,prop,[prop,val1,val2,prop2,val21,val22,...]
+ * exp类型:	eval,name,exp,exp1,exp2[...]
+ * call类型: eval,name,call,func,paramter 执行target中的方法,方法的参数为(target,result,其他指定的参数)
+ * pos/rect/name/face/glyph/margin了下:	eval,name,(type),targetname,x,y,w,h
+ * @return 
+ */
+function uiloadEvals(target, evals, result, base) {
+	if (evals == void) return;
+	var brect;
+	if (base !== void) brect = uiloadGetRect(base, result);
+	for (var i = 0; i < evals.count; i++) {
+		var cur = evals[i];
+		switch (cur[0]) {
+		case "pos":   uiloadSetRect(target, uiloadGetRect(cur[1], result), brect, cur[2], cur[3]); break;
+		case "rect":  uiloadSetRect(target, uiloadGetRect(cur[1], result), brect, cur[2], cur[3], cur[4], cur[5]); break;
+		case "prop": //为target设置属性
+			for (var j = 1; j < cur.count-1; j+=2)
+				target[cur[j]] = Scripts.eval("("+cur[j+1]+")");
+			break;
+		case "exp":
+			cur.erase(0);
+			(function(e) { e!; } incontextof target)(cur.join(",")); //在target上下文文 将字符串解析并执行
+			break;
+		case "call":
+			var ctx = (target instanceof "Dictionary") ? global : target;
+			var f = Scripts.eval('function() { return "' + cur[1] + '"!; }');
+			var r = (f incontextof ctx)();
+			if (typeof r == "Object" && r instanceof "Function") {
+				cur.erase(0);
+				cur.erase(0);
+				r(target, result, cur*);
+			}
+			break;
+		}
+	}
+}
+
+
+
+// MessageLayer/DialogLayerにUIを登録するためのクラス
+class uiEntryNormal {
+	/** 
+	* @description: 
+	* @param layer	操作的层
+	* @param name	部件的名称
+	* @param value	部件的参数
+	* @param elm	uiload的参数
+	* @return 
+	*/
+	function base(layer, name, value, elm) {
+		var uioffx, uioffy;
+		with (layer.window) {
+			uioffx = typeof .uiOffsetx != "undefined" ? .uiOffsetx : 0;
+			uioffy = typeof .uiOffsety != "undefined" ? .uiOffsety : 0;
+		}
+		var e = %[];
+		(global.Dictionary.assign incontextof e)(elm,false);
+		e.left   = value.x + e.baseoffsetx + uioffx;
+		e.top    = value.y + e.baseoffsety + uioffy;
+		e.width  = value.width;
+		e.height = value.height;
+		e.frame  = value.storage if e.frame === void;
+		if (e.frame == "") {				// 若不指定frame 则默认背景透明,且事件穿透
+			e.frame = ""  if e.frame   === void;
+			e.opacity = 0 if e.opacity === void;
+			e.color   = 0 if e.color   === void;
+			e.transparent = true;
+		}
+
+		e.transparent = false if e.transparent === void;
+		switch (e.visible) {
+		case null: case "null": delete e.visible; break;
+		case void: case "void": e.visible = true; break;
+		}
+		layer.setOptions(e);			// 这个属性用于设置ui-base
+	}
+
+	// virtual
+	function _add(layer, type, value) { 
+		layer["add"+type](value); 
+	}
+	function _get(layer, name) { return layer.names[name]; }
+
+	// 通常登録処理  为层添加ui  type：类型 layer：层 name：返回的层ui名称  value：参数
+	function _entry(type, layer, name, value) {
+		with (value) {
+			var s;
+			if (.nouiload) s = .uistates, .uistates = void;
+			_add(layer, type, value);
+			if (s !== void) .uistates = s;
+			return _get(layer, .name);
+		}
+	}
+	// 各ui type登録
+	function button(*) { return _entry("Button", *); }
+	function toggle()  { return button(...); }
+	function radio()   { return button(...); }
+	function slider(layer, name, value) {
+		var v = %[];
+		(global.Dictionary.assign incontextof v)(value,false);
+		with (v) {
+			// デフォルト値の設定
+			.nohilight = true if .nohilight === void;
+			.nofixpos  = true if .nofixpos  === void;
+			.bgcolor   = 0    if .bgcolor   === void;
+			.opacity   = 0    if .opacity   === void;
+			if (.uipsdfix) {
+				if (!.vertical) .width+=2,  .x-=1;
+				else            .height+=2, .y-=1;
+			}
+		}
+		return _entry("Slider", layer, name, v);
+	}
+
+	// レイヤを登録する
+	function layer(layer, name, value) {
+		if(isBlank(value.layer))throw new Exception(@"layer ${name} 's state is blank");
+		var ns = %[ normal: value.uistates[value.layer] ];	// 这里指定了normal时的图像，那么就会一直使用该图像
+		ns <-> value.uistates;
+		var target = _entry("Layer", layer, name, value);
+		ns <-> value.uistates;
+		return target;
+		// return uiSetLayerOption(target);
+	}
+}
+
+// uiload/uiloadSystem参照用インスタンスを生成
+var uiEntryFuncs      = new uiEntryNormal();
+
+
+/**
+ * UIのロード処理
+ * @param layer レイヤ名
+ * @param ロードする定義ファイル
+ */
+function uiload(layer, elm)
+{
+	layer.clearLayer();// 先清除所有控件
+	layer.onUiload(elm);
+	var parse = uiloadParse(elm);
+	if(!isBlank(parse)) with (parse) 
+		uiloadEntry(layer, .names, .result, elm, uiEntryFuncs, .evals, .order);
+	layer.onUiloaded(parse);
+	invalidate parse;
+}

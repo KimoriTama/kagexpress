@@ -1,0 +1,407 @@
+/**-------------------------------------------------------------
+ * ヘルプテキスト読み込み／表示
+ *
+ * 使い方：
+
+  @ 构造函数
+		 help = new HelpTextManager(this, "helpfile.txt", [layername, drawopt]);
+  @ onUiloaded
+		if (help) help.setup(ui);
+  @ 強制描画
+		if (help) help.drawHelpTipTag(tag);
+
+  @ 帮助文件的格式
+  键名1[\t键名2\t...]
+  \t${sysLan的标签名}[\t${sysLan的标签名，第二行}${eval評価}]
+
+ **/
+
+
+SetSystemConfigDefaults(
+	%[
+	helpTextFadeTime: 200,
+	helpTextDefaultLayerTarget: "helptext",
+	helpTextDrawOption: %[
+		/**/color:0xFFFFFF, halign:-1, valign:0,
+		/**/fontface:"宋体", fontheight: 15, linestep:20,
+		//param:[255, true, 1024, 0x000000, 1, 0, 0 ]
+		]
+]);
+
+
+class HelpTextManager {
+	var owner;	// 所有者
+	var tips;	// 提示图层的领域判断层
+	var mode = "text";	// text 或者 image	，text模式为默认，image模式会将获取到的
+	var prefix;	//	获取本地化文本的前缀，如果使用 text 模式，会使用此前缀从 systemlanguage中 获取对应的文字
+	var drawOption;	//绘制选项
+	var ignoreStable = true;	//是否忽视不稳定状态
+	var tipsTargetName;		// 绘制提示的层目标
+	
+	var _currentHelp;		// 当前的提示
+	var _forceFixText = false;	// 外部调用的情况下，强制一直锁定提示，不会由鼠标移动清除
+	var _helpTexts; // 由指定文件中加载获得的提示信息映射
+	var _fadeTime = SystemConfig.helpTextFadeTime;
+	var _helpBinds = []; // 存储需要判定提示的控件名，下标代表在领域层上的色值
+
+	function HelpTextManager(textfile, layname, drawopt = SystemConfig.helpTextDrawOption) {
+		drawOption = drawopt;
+		tipsTargetName = layname != "" ? layname : SystemConfig.helpTextDefaultLayerTarget;
+		_loadHelpTexts(textfile);
+		// kag.addHook("onGestureShowHideHelp", reload);
+	}
+	function finalize {
+		try { 
+			if(isBlank(owner)||isBlank(owner.window))return;
+			owner.window.removeHook("onMouseMove", onMouseMove); 
+		} catch {}
+		// try { kag.removeHook("onGestureShowHideHelp", reload); } catch {}
+		invalidate tips if (tips);
+	}
+
+	function _loadHelpTexts(file) {
+		if (isBlank(file) || !Storages.isExistentStorage(file))
+			return; 
+		var list = [], r = %[ id:%[], remap:%[], texts:%[] ], cur;
+		list.load(file);
+		for (var i = 0; i < list.count; i++) {
+			var div = ((string)list[i]).split("\t");
+			if (!div.count || div[0].charAt(0) == "#") continue;
+			if (div[0] != "") {		//开头无空格代表键，否则为值
+				cur = div;
+			} else if (div[1] != "") {
+				var texts = [];
+				texts.assign(div);
+				texts.shift();
+				var text = texts.join("\n");		// 文字分开多个则作为换行
+				if (cur === void) throw new Exception(@"invalid help text format:${file}:${num}: ${text}");
+				for (var n = 0; n < cur.count; n++) {
+					var id = cur[n];
+					r.id[id] = true;
+					r.texts[id] = text;
+				}
+				cur = void;
+			}
+		}
+		return (_helpTexts = r);
+	}
+	function _createTipsLayer() {
+		if (tips === void) try {
+			tips = new Layer(owner.window, owner);
+			with (tips) {
+				.name = "HelpTextTipsProvinceLayer";
+				.setPos(0, 0, owner.width, owner.height);
+				.visible = false;
+				.face = dfAlpha;
+			}
+		} catch {}
+		return isvalidTipsLayer();
+	}
+	/** 
+	* @description:	初始化提示信息，在owner拥有ui控件后调用	 
+	* @param owner	所有者（必须为dialoglayer）
+	* @return 	void
+	*/	
+	function setup(owner) {
+		this.owner = owner;
+		owner.window.removeHook("onMouseMove", onMouseMove);
+		owner.window.addHook("onMouseMove", onMouseMove);
+		_currentHelp = void;
+		_helpBinds.clear();
+		if (_helpTexts === void || !_createTipsLayer()) return;
+		clearTipsLayer();
+		_helpBinds.add(void);	// _helpBinds 是用数组下标 表示领域区域的色值，所以不能为0,0号位要空着
+		for(var i=0;i<owner.links.count;i++){
+			var target  = owner.links[i].object;
+			var name =  target.name;
+			var tag = isBlank(target,"helptip")?name:target.helptip;
+			if (isBlank(_helpTexts.id[tag])) //不在加载的文件中有指定则跳过
+				continue;
+			var col = _helpBinds.find(name);		//已经加载了也不管
+			if (col < 0) {
+				col = _helpBinds.count;
+				_helpBinds.add(name);
+			}
+			with (target) {
+				tips.face = dfProvince;		// 先绘制领域图像 标注此位置是哪个控件
+				tips.fillRect(.left, .top, .width, .height, col);
+				tips.face = dfMask;		// 再绘制透明度		用于判断碰撞
+				tips.copyRect(.left, .top, target, 0, 0, .width, .height);
+			}
+		}
+	}
+
+	/** 
+	 * @description:	清除判断鼠标移动的提示判断层（一般用于更换owner后触发） 
+	 * @return 	void	
+	 */
+	 function clearTipsLayer(){
+		if (tips) with (tips){
+		 	.face = dfProvince;
+			.fillRect(0, 0, .width, .height, 0);
+		 	.face = dfMask;
+			.fillRect(0, 0, .width, .height, 0);
+		}
+	}
+	function isvalidTipsLayer() {
+		return tips && isvalid tips;
+	}
+
+	/** 
+	* @description: 	判断当前鼠标选中的控件
+	* @return 			当前控件的名称,或void
+	*/	
+	function _getHelpBindFromPos() {
+		var num = 0;
+		if (canCheckHelpTipArea()) with (tips) {
+			var x= .cursorX , y = .cursorY;
+			num = (x < 0 || y < 0 || x >= .width || y >= .height) ? 0 : .getProvincePixel(x, y);
+			var name = _helpBinds[(int)+num];
+			if(isBlank(name)||isBlank(owner.names.name))return;
+			var target = owner.names[name];
+			return .getProvincePixel(x, y)>= target.hitThreshold ? name:void; 	// 仅当mask值大于阈值才判断成功
+		}
+		return void;
+	}
+	
+	function canCheckHelpTipArea {
+		return currentDialog === void && isvalidTipsLayer() && (ignoreStable || owner.window.inStable);
+	}
+	
+
+	function _getHelpTipTargetLayer() {
+		return !isBlank(owner.names,tipsTargetName)? owner.names[tipsTargetName] : void;
+	}
+	
+	function startFade(vis) {
+		var help = _getHelpTipTargetLayer();
+		if (help) with (help) {
+			.delAction("fade");
+			.addAction("fade",true,[%[opacity:%[ handler:"MoveAction", start:(.opacity=vis?0:255), value:vis?255:0, time:_fadeTime]]]);
+		}
+	}
+	function setNonFadeOpacity(vis) {
+		var help = _getHelpTipTargetLayer();
+		if (help) {
+			help.opacity = vis ? 255 : 0;
+			help.delAction("fade");
+		}
+	}
+	function _drawHelpTipText(text) {
+		var help = clearHelpTipText();
+		if (help && !isBlank(text)) with (help) {
+			if(mode == "image"){
+				var img = text;
+				if(Storages.isExistentStorage(img + "_" + SystemLanguage.mainLan)) 
+					img = img + "_" + SystemLanguage.mainLan;
+				help.loadImages(img);
+			}else if(mode == "layer"){
+				if(!isBlank(owner.names,text + "_" + SystemLanguage.mainLan)) 
+					text = text + "_" + SystemLanguage.mainLan;
+				if(isBlank(owner.names,text))
+					dm("warnning: the target layer is not exist:"+text);
+				else{
+					var lay = owner.names[text];
+					help.setPos(lay.left,lay.top,lay.width,lay.height);
+					help.assignImages(lay);
+				}
+			}else if(mode == "text"){
+				var elm = %[ x:0, y:0, w:.width, h:.height ];
+				(Dictionary.assign incontextof elm)(drawOption, false) if (drawOption);
+				drawTextKinsokuRect(help, text, elm);
+			}
+		}
+		return help;
+	}
+
+	/** 
+	* @description: 	绘制提示，同时展示动画
+	* @param tag		提示的键，为空时清除已绘制的提示
+	* @param nofade		是否显示渐变动画
+	* @return 
+	*/
+	function showHideHelpTip(tag, nofade = false) {
+		if (_forceFixText) return;		// 强制显示提示的情况下跳过
+		if (_currentHelp === tag)return;
+		var help = _getHelpTipTargetLayer();
+		if(isBlank(help))return;
+		_currentHelp  =  tag;
+		var text = getHelpText(tag);
+		_drawHelpTipText(text);
+		if (!nofade) {
+			startFade(!isBlank(text));
+		} else {
+			setNonFadeOpacity(!isBlank(text));
+		} 
+	}
+
+	function onMouseMove(x, y) {
+		showHideHelpTip(_getHelpBindFromPos()) if (!isBlank(_helpTexts));
+	}
+
+	
+	/** 
+	* @description: 	重新加载当前提示
+	* @param nofade		是否有动画
+	* @return 	void
+	*/	
+	function reload(nofade = true) {
+		_currentHelp = void;
+		clearHelpTipText();
+		showHideHelpTip(_getHelpBindFromPos(),nofade) if (!isBlank(_helpTexts));
+	}
+	function clearHelpTipText() {
+		_forceFixText = false;
+		var help = _getHelpTipTargetLayer();
+		if (help) with (help) .fillRect(0, 0, .width, .height, 0);
+		return help;
+	}
+
+	/** 
+	* @description: 	由名称获取对应的提示文字，为空时也会返回空
+	* @param tag		提示的标签
+	* @return 	void 或文字
+	*/
+	function getHelpText(tag) {	// todo 改成可由language控制的形式
+		if (tag==void || isBlank(_helpTexts.id,tag)) return void;
+		return applyInlineStringVariableExtract(_helpTexts.texts[tag], owner);
+	}	
+
+	function clear() {
+		var help = _getHelpTipTargetLayer();
+		if (help)help.delAction("fade");
+		clearHelpTipText();
+		_currentHelp = void;
+		_helpBinds.clear();
+		_helpTexts = void;
+		clearTipsLayer();
+	}
+	
+
+	function _mergeDictionary(dst, src) {
+		if (src && dst) {
+			// 要素内の子配列/辞書も完全にコピーしてからマージ
+			var tmp = %[];
+			(Dictionary.assignStruct incontextof tmp)(src);
+			(Dictionary.assign incontextof dst)(tmp, false);
+		}
+		return dst;
+	}
+	function updateDrawOption(merge) {
+		var upd = _mergeDictionary(%[], drawOption);
+		drawOption = _mergeDictionary(upd, merge);
+	}
+
+
+	function drawHelpTipText(text, fix=false, nofade=true) {
+		_forceFixText = fix;
+		_drawHelpTipText(text);
+		if (!nofade) startFade(isBlank(text));
+		else setNonFadeOpacity(isBlank(text));
+	}
+	function drawHelpTipTag(tag, fix, nofade=true) {
+		drawHelpTipText(getHelpText(tag), fix,nofade);
+	}
+}
+
+/*
+class        SingletonHelpTextDialog extends DialogLayer {
+	function SingletonHelpTextDialog(win, helpcls = HelpTextManager, *) {
+		with (win) {
+			.add(this);
+			.addPlugin(this);
+		}
+		coverParent = false;
+		super.DialogLayer(win, win.uibase, "HelpTextDialog");
+
+		setup(helpcls, *);
+	}
+	var _helpman;
+	function finalize {
+		invalidate _helpman if (_helpman);
+		super.finalize(...);
+	}
+	function setup() {
+		var storage = SystemConfig.helpTextSingletonUIStorage;
+		if (storage == "") storage = "helptext";
+		var elm = %[ storage:storage , transparent:true, visible:false, color:0, opacity:0 ];
+		onUiloaded(elm, uiload(elm));
+
+		hitType = htMask;
+		hitThreshold = 256;
+		joinFocusChain = false;
+		focusable = false;
+		absolute = window.historyLayerAbsolute+1; // [XXX]
+
+		createHelpManager(...);
+	}
+	function onUiloaded(elm, ui) {}
+
+	property canShow {
+		getter { return !window.scflags.DisableHelpTextDialog; }
+		setter(v) {      window.scflags.DisableHelpTextDialog = !v;
+			if (_helpman) with (_helpman) {
+				if (v) .reload();
+				else {
+					stopFade();
+					visible = false;
+				}
+			}
+		}
+	}
+	function createHelpManager(cls, *) {
+		_helpman = new cls(this, window, *);
+		with (_helpman) {
+			// [XXX]
+			._getHelpTipTargetLayer = this._getHelpTipTargetLayer;
+			.startFade = this.startFade;
+			.stopFade = this.stopFade;
+			.setNonFadeOpacity = this.setNonFadeOpacity;
+		}
+	}
+	function _getHelpTipTargetLayer {
+		var name = _helpman.tipsTargetName;
+		return name != "" ? names[name] : void;
+	}
+	function startFade(vis) {
+		stopFade();
+		if (canShow) {
+			showHideFade(vis, _helpman._fadeTime);
+		} else {
+			visible = false;
+		}
+		if (!vis) _helpman._forceFixText = false; // [XXX]
+	}
+	function stopFade {
+		window.stopAction(this, true);
+	}
+	function setNonFadeOpacity(vis) {
+		stopFade();
+		visible = canShow && vis;
+		opacity = 255;
+	}
+	function onShowHideFadeDone(vis, en) { visible = vis; }
+
+	function clear() {
+		if (_helpman) _helpman.allClearAndUnload();
+		visible = false;
+	}
+	function load(file, ui, *) {
+		if (!_helpman) return;
+		if (file != "") {
+			if (_helpman._loadHelpTexts(file) === void) {
+				dm("there is no help text :"+file);
+			}
+		}
+		if (ui !== void) {
+			_helpman.setup(ui, *);
+		}
+	}
+	function showHideForceText(text, fade = true) {
+		if (text != "" && text.charAt(0) == "!" && text.length > 1) { // [XXX]
+			text = SystemConfig[text.substr(1)];
+		}
+		_helpman.drawHelpTipText(text, false, !fade);
+	}
+}
+*/

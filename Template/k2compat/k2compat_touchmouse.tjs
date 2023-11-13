@@ -1,0 +1,216 @@
+//=============================================================
+// タッチ操作をLayerのマウスイベントに変換する処理
+
+// 基本的にマルチタッチ時は動作しません（マルチタッチでキャンセル動作になります）
+
+// 各レイヤインスタンスの layer.touchMouseType = tmt* でタッチの挙動を変更できます
+
+var tmtDefault   = 0; // デフォルトの挙動（typeof layer.touchMouseType == "undefined"でも同様）
+var tmtTapOnly   = 1; // 短時間でほぼ同じ位置のonTouchDown->onTouchUp時にクリック挙動(onMouseDown->onMouseUp)が行われます
+var tmtDraggable = 2; // イベントのキャプチャ処理が行われます（スライダーなどのドラッグ処理があるレイヤに指定します）
+var tmtWheel     = 3; // 上下ホイールイベントが送られます
+
+@if (0)
+/*
+ * 独自にタッチジェスチャ機能などを実装する場合，スワイプ判定と競合するため，
+ * 必ず Krkr2CompatUtils.defaultTouchMouseType = tmtTapOnly として
+ * ドラッグが必要なレイヤのみ個別に touchMouseType = tmtDraggable としてください
+ *
+ * tmtDefault は Krkr2CompatUtils.TouchMouseConfig.DefaultType で指定された値が使用されます
+ */
+
+with (Krkr2CompatUtils) {
+
+	// タッチマウス各種設定
+	.TouchMouseConfig = %[
+
+	DefaultType: tmtDraggable, // デフォルトの挙動選択
+
+	TapTimeThreshold: 100, // tmtTapOnlyの最大タップ判定時間(ms)
+	TapMoveThreshold:   5, // tmtTapOnlyの最小移動距離(pixel)
+
+	WheelMinTick: 10, // tmtWheelのホイールイベント判定最小時間
+	WheelCoef:    60, // tmtWheelのホイール速度係数
+
+		];
+
+	var addFunc = function(method, func) { this[method] = func incontextof this; } incontextof Krkr2CompatUtils;
+
+	// Layer.onTouch* はマウスのようにイベントキャプチャがないので自前で実装する必要がある
+	.hookInjection(Layer,"releaseCapture",function (orig, *) { global.Krkr2CompatUtils.hookLayerReleaseCapture(this); return orig(*); } incontextof null);
+	.hookInjection(Layer, "onTouchDown",  function (orig, *) { global.Krkr2CompatUtils.hookLayerTouchDown  (this, *); return orig(*); } incontextof null);
+	.hookInjection(Layer, "onTouchMove",  function (orig, *) { global.Krkr2CompatUtils.hookLayerTouchMove  (this, *); return orig(*); } incontextof null);
+	.hookInjection(Layer, "onTouchUp",    function (orig, *) { global.Krkr2CompatUtils.hookLayerTouchUp    (this, *); return orig(*); } incontextof null);
+
+	addFunc("hookLayerReleaseCapture", function (lay) {
+		if (!isvalid lay) return;
+		var info = getTouchMouseInfo(lay.window);
+		if (info.target) cancelTouchMouse(info);
+	});
+	addFunc("hookLayerTouchDown",   function (lay, x,y, cx,cy, id) {
+		if (!isvalid lay) return;
+		var win = lay.window;
+		var info = getTouchMouseInfo(win);
+		if (info.target) cancelTouchMouse(info);
+		else if (win.touchPointCount == 1) beginTouchMouse(info, lay, id, x, y);
+	});
+	addFunc("hookLayerTouchMove",  function (lay, x,y, cx,cy, id) {
+		if (!isvalid lay) return;
+		var info = getTouchMouseInfo(lay.window);
+		with (info) if (.target && .id == id) {
+			if (.lastX !== void && .lastX === x && .lastY === y) return;
+			.lastX = x, .lastY = y;
+			updateTouchMouse(info, lay, x, y);
+		}
+	});
+	addFunc("hookLayerTouchUp",    function (lay, x,y, cx,cy, id) {
+		if (!isvalid lay) return;
+		var info = getTouchMouseInfo(lay.window);
+		with (info) if (.target && .id == id) endTouchMouse(info, lay, x, y);
+	});
+
+	.TouchMouseInfo = %[];
+	addFunc("getTouchMouseInfo", function (win) {
+		var r = TouchMouseInfo[win];
+		if (r === void)
+			r = TouchMouseInfo[win] = %[];
+		return r;
+	});
+
+	addFunc("beginTouchMouse", function (info, lay, id, x, y) {
+		lay.setCursorPos(x, y);
+		with (info) {
+			var getStartXY = false;
+			.target = lay;
+			.id = id;
+			switch (.type = getTouchMouseType(lay)) {
+			case tmtTapOnly:
+				.time = System.getTickCount();
+				.maxdistance = 0;
+				//getStartXY = true;
+				break;
+			case tmtDraggable:
+				.syncpos = true;
+//				.cancel = tmcRclick | tmcEnd; // [XXX] tmcRclick hang up on multitouch
+				postTouchMouseLayerEvent(lay, "onMouseDown", x, y, mbLeft, getTouchMouseModifier());
+				break;
+			case tmtWheel:
+				getStartXY = true;
+				break;
+			default:
+				error(messageTag+".beginTouchMouse: unknown touchMouseType");
+			}
+			if (getStartXY) {
+				var touch = findTouchPoint(lay.window, id);
+				if (touch) {
+					.x = touch.startX;
+					.y = touch.startY;
+				}
+			}
+		}
+	});
+	addFunc("getTouchMouseType", function(lay) {
+		if (typeof lay.touchMouseType == "Integer")
+			return lay.touchMouseType;
+		return TouchMouseConfig.DefaultType;
+	});
+	addFunc("findTouchPoint", function (win, id) {
+		for (var i = 0, cnt = win.touchPointCount; i < cnt; i++) {
+			var touch = win.getTouchPoint(i);
+			if (touch && touch.ID == id) return touch;
+		}
+	});
+
+	addFunc("updateTouchMouse", function (info, lay, x, y) {
+		if (isvalid info.target) with (info) {
+			switch (.type) {
+			case tmtTapOnly:
+				var touch = findTouchPoint(.target.window, .id);
+				if (touch) {
+					var dx = Math.abs(touch.x - touch.startX);
+					var dy = Math.abs(touch.y - touch.startY);
+					var d  = Math.sqrt(dx*dx + dy*dy);
+					if (.maxdistance < d) .maxdistance = d;
+				}
+				break;
+			case tmtDraggable:
+				lay.setCursorPos(x, y);
+				postTouchMouseLayerEvent(.target, "onMouseMove", .target.cursorX, .target.cursorY, getTouchMouseModifier(ssLeft));
+				break;
+			case tmtWheel:
+				var x, y, speed;
+				if (.target.window.getTouchVelocity(.id, x, y, speed)) {
+					var conf = TouchMouseConfig;
+					var delta = int(Math.round(y / conf.WheelCoef));
+					//trace("wheel", delta);
+					postTouchMouseWindowEvent(.target.window, "onMouseWheel", getTouchMouseModifier(), delta, .x, .y);
+				}
+				break;
+			}
+		}
+	});
+
+	addFunc("endTouchMouse", function (info, lay, x, y) {
+		if (isvalid info.target) with (info) {
+			switch (.type) {
+			case tmtTapOnly:
+				if (.target === lay) {
+					var conf = TouchMouseConfig;
+					var time = System.getTickCount();
+					var tmmax = typeof lay.tapTimeThreshold == "Integer" ? lay.tapTimeThreshold : conf.TapTimeThreshold;
+					var mvmax = typeof lay.tapMoveThreshold == "Integer" ? lay.tapMoveThreshold : conf.TapMoveThreshold;
+					//trace("TapOnly", "time", time - .time, tmmax, "move", .maxdistance, mvmax);
+					if ((tmmax <= 0 || (time - .time <= tmmax)) && 
+						(mvmax <  0 || (.maxdistance <= mvmax))) {
+						postTouchMouseLayerEvent(.target, "onMouseDown", x, y, mbLeft, getTouchMouseModifier());
+						postTouchMouseLayerEvent(.target, "onMouseUp",   x, y, mbLeft, getTouchMouseModifier());
+					}
+				}
+				break;
+			case tmtDraggable:
+				if (lay) lay.setCursorPos(x, y);
+				postTouchMouseLayerEvent(.target, "onMouseUp", .target.cursorX, .target.cursorY, mbLeft, getTouchMouseModifier());
+				break;
+			case tmtWheel:
+				
+				break;
+			}
+		}
+		(Dictionary.clear incontextof info)();
+	});
+
+	.tmcRclick = 0x01;
+	.tmcEnd    = 0x02;
+	addFunc("cancelTouchMouse", function (info) {
+		var cancel = int (+info.cancel);
+		if (cancel & tmcRclick) with (info) {
+			if (isvalid .target) {
+				var x = .target.cursorX, y = .target.cursorY;
+				postTouchMouseLayerEvent(.target, "onMouseDown", x, y, mbRight, getTouchMouseModifier());
+				postTouchMouseLayerEvent(.target, "onMouseUp",   x, y, mbRight, getTouchMouseModifier());
+			}
+		}
+		if (cancel & tmcEnd) endTouchMouse(info);
+		else {
+			(Dictionary.clear incontextof info)();
+		}
+	});
+
+	addFunc("postTouchMouseLayerEvent", function(lay, ev, *) {
+		if (lay.nodeEnabled) lay[ev](*);
+	});
+
+	addFunc("postTouchMouseWindowEvent", function(win, ev, *) {
+		win[ev](*);
+	});
+
+	addFunc("getTouchMouseModifier", function(r = 0) {
+		var gks = System.getKeyState;
+		r |= ssAlt   if (gks(VK_MENU));
+		r |= ssShift if (gks(VK_SHIFT));
+		r |= ssCtrl  if (gks(VK_CONTROL));
+		return r;
+	});
+	
+}
+@endif

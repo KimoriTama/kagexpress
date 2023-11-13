@@ -1,0 +1,518 @@
+class CustomOption extends OptionBase {
+	var help;
+	function CustomOption(){
+        super.OptionBase();
+        addUpdate("page", updatePageToggle);
+        addOnOffItem("topMost","topmost",void,"kag.stayOnTop");
+    	// addOnOffItem("downDisable",     "downdisable",     void,      "kag.bgmdown");
+		var drawopt = SystemConfig.helpTextDrawOption;
+		drawopt.fontface = kag.getFontFace();
+		help = new HelpTextManager("help_sys.txt", "helptext",drawopt);
+		help.mode="text";
+	}
+    function finalize(){
+		invalidate help;
+		super.finalize();
+    }
+
+    function onUiload(elm) {
+        elm.storage.push("sys_page"+ (+sf.systemPage));
+		var rm = [ "rm_base", "remove" ];
+		// rm.add(_qmPrevScn ? "cp_prev" : "cp_prev_scn");
+		// rm.add(_qmNextScn ? "cp_next" : "cp_next_scn");
+		elm.partremove=rm.join(",");
+	}
+	function onUiloaded(elm) {
+		update();
+		help.setup(owner);
+		/*var cur = kag.current;
+		setupWindowColor(cur, elm, ui);
+		setupColorPicker(cur, elm, ui);
+		setupMouseGesture(cur, elm, ui);
+		setupCharVoice  (cur, elm, ui);
+		setupHelpManager(cur, elm, ui);*/
+	}
+
+	function getIntRanged(min, max, n) { n = (int)+n; return n < min ? min : n > max ? max : n; }
+    function updatePageToggle(num) {
+        if(isBlank(num)) num = +sf.systemPage;
+        else sf.systemPage = num = getIntRanged(num);
+		setItemProp("page"+num, "toggle", true);
+	}
+}
+class  QLoadPopupLayer extends FloatLayer {
+	var mode = "quick";
+	var per = 12;
+	function QLoadPopupLayer(win=kag,par,name,storage) {
+		super.FloatLayer(...);
+	}
+	function show(layer,elm){
+		drawItem(elm.data);
+		super.show(layer,elm);
+	}
+	function getShadowColor(){return CustomeSaveLoad.getShadowColor(...);}
+	function getLabelText(){return CustomeSaveLoad.getLabelText(...);}
+	function drawItem(datanum = 0) {		// 绘制缩略图
+		var info = getItemInfo(datanum), target;
+		if (isBlank(info)) return false;
+		drawItemOne(datanum,info);
+		with (target = names.thumb) {
+			var w = .width, h = .height;
+			.fillRect(0, 0, w, h, 0xFF000000);
+			.loadButtons(info.thumbnail); 
+		}
+		if(mode == "continue"){
+			names.qload.visible =false;
+			names.load.visible =true;
+		}else {
+			names.qload.visible =true;
+			names.load.visible =false;
+		}
+		return true;
+	}
+
+	function drawItemOne(datanum,info){ 	// 绘制单个存档图片
+		CustomeSaveLoad.drawBookMark(0,info,"label",names.label);//日期
+		CustomeSaveLoad.drawBookMark(0,info,"text",names.text);// 文字
+	}
+
+	function getItemInfo(datanum) {
+		var file, info = %[];
+		if (typeof datanum == "Integer") {
+			mode = "quick";
+			file = kag.getBookMarkFileNameAtNum(datanum);
+			if (!Storages.isExistentStorage(file)) return void;
+			var bookmark  = kag.bookMarks[datanum];
+			(Dictionary.assign incontextof info)(bookmark, true) if (bookmark !== void);
+			info.realdate = info.date;
+			//lastTextNum	lastTextStorage	name	date
+		} else if (typeof datanum == "String" && datanum != "") {
+			mode = "continue";
+			file = datanum;
+			var data = kag.readBookMarkFromFile(file);
+			if (isBlank(data)) return false;
+			with (data.core) {
+				info.title     = .currentPageName;
+				info.lastTextStorage = .lastTextStorage;
+				info.lastTextNum = .lastTextNum;
+				info.comment = .comment;
+				var date = new Date();
+				var fmt  = "%04d/%02d/%02d %02d:%02d" + (kag.bookMarkDateSecond ? ":%02d" : "");
+				date.setTime(.storeTime);
+				with (date) info.realdate = fmt.sprintf(
+					.getYear(),  .getMonth() + 1, .getDate(),
+					.getHours(), .getMinutes(),   .getSeconds());
+			}
+		}
+		info.thumbnail = file;
+		return info;
+	}
+}
+function createQLoadPopupLayer() {
+	if (isBlank(kag,"qLoadPopupLayer")){
+		kag.qLoadPopupLayer = new QLoadPopupLayer(kag,kag.fore.ui,"qLoad popup Layer",%[storage:"qload_popup",visible:false]);
+		kag.add(kag.qLoadPopupLayer);
+	}
+	return kag.qLoadPopupLayer;
+}
+class CustomeSaveLoad extends ScrollSaveLoadBase {
+	var editPanel;
+	function CustomeSaveLoad(elm){
+		super.ScrollSaveLoadBase(...);
+		template.push("label","text"); // 用于复制的模板按钮
+	}
+
+	/** 
+	* @description: 绘制单个存档格
+	* @param num	存档编号(实际编号)
+	* @param info	存档信息
+	* @param name	存档格的部件的名称 
+	* @param target	绘制层对象 
+	*/
+	function drawBookMark(num,info,name,target){
+		if(num>=120 || (mode=="qload" && num>=12) ){	// 超过最大的就不绘制了
+			target.visible= false;
+			return;
+		}
+		super.drawBookMark(...);
+		
+		var elm,maxline,pad,h,text;
+		
+		switch(name){
+			case "edit":
+				if(_copying || _moving)target.visible =false;
+				return;
+			case "label":
+				target.visible = true;
+				text = getLabelText(num) +" "+ info.realdate;
+				h=15;
+				maxline = 1;
+				pad=1;
+				break;
+			case "text":
+				if(isBlank(info))return;
+				if(isBlank(info.comment))
+					text = SystemLanguage.getScenarioText(,info.lastTextStorage,info.lastTextNum).text;
+				else text = info.comment;
+				h=16;
+				maxline = 4;
+				pad=3;
+				break;
+			// case "edit":
+			default:return;
+		}
+		// h = (rect.h-(1+maxline)*pad)\maxline if (h === void);
+		with(target).fillRect(0, 0, .width, .height, 0);
+		var elm = %[ x:pad, y:pad, w:target.width-pad*2, h:target.height-pad*2,
+			maxline: maxline, //最大行数
+			linestep: h + pad, halign:-1,
+			color: 0xFFFFFF, //getFontColor(),
+			param:[255,true, 2048, getShadowColor(), 2, 0, 1 ],
+			fontface: kag.getFontFace(),
+			fontheight: h
+			];
+
+		drawTextKinsokuRect(target, text, elm);
+	} 
+	function getLabelText(num){
+		var fmt = "";
+		if(mode == "continue")return  "Continue";
+		if (num < per) return ( "Quick%d" ).sprintf(num+1);
+		return "No.%04d-%02d".sprintf(num\per, num%per+1);
+	}
+		
+	function getShadowColor () {
+		var _fontColors = %[
+		save  : 0x321c7c,
+		load  : 0x03454d,
+		"continue" => 0x03454d,
+		quick : 0x80360d
+			];
+		if (typeof _fontColors[mode] == "Integer")
+			return   _fontColors[mode];
+		return 0x3d1f1f; 
+	}
+	function updateButton(){
+		super.updateButton();
+		var links = owner.names;
+		with(links) {
+			var canUp = !(scroll == scrollMax);
+			var candown = !(scroll == scrollMin);
+			.page_dw1.enabled = candown if(!isBlank(.page_dw1));
+			.page_dw10.enabled = candown if(!isBlank(.page_dw10));
+			.page_top.enabled = candown if(!isBlank(.page_top));
+	
+			.page_up1.enabled = canUp if(!isBlank(.page_up1));
+			.page_up10.enabled = canUp if(!isBlank(.page_up10));
+			.page_end.enabled = canUp if(!isBlank(.page_end));
+		}
+		drawPageText();
+	}
+	function drawPageText() {
+		var lay = owner.names.page_text;
+		if(isBlank(lay))return;
+		with(lay){
+			.fillRect(0, 0, .width, .height, 0);
+			drawTextKinsokuRect(lay, "%04d/%04d".sprintf(page, _max), %[
+			x:0, y:1, w:.width, h:.height-1, fontface:kag.getFontFace(), fontheight:15,
+			halign:0, valign:0, color:getShadowColor(), //param:[255, true, 512, 0xFFFFFF, 1, 0, 0 ] // [XXX]
+				]);
+		}
+	}
+	// 该存档是否可操作，不为空，且不被保护,或移动和复制选中了此项目
+	function isEnabled(num) {
+		if(mode =="qload")
+		{
+			if(!isBlank(_targetNum)){	//正在复制或移动
+				if(isBlank(kag.bookMarks[num]))return true;
+				if(_targetNum == num) return false;
+				return !kag.bookMarks[num].protectedStates;
+			}	
+			if(isBlank(num)) return false;
+			if(!isExistData(num)) return false;
+			else return true;
+		}
+		else return super.isEnabled(num);
+	}
+	function beginCopy(num){
+		super.beginCopy(num);
+		tf.sl_state = "copy";
+		tf.sl_num = _targetNum;
+	}
+	function beginMove(num){
+		super.beginMove(num);
+		tf.sl_state = "move";
+		tf.sl_num = _targetNum;
+	}
+
+
+	function showEdit(num){
+		var grp;
+		switch (mode){
+			case "qload":grp ="grp_qload"; break;
+			case "load":grp ="grp_load"; break;
+			case "save":grp ="grp_save"; break;
+		}
+		editPanel = new FloatLayer(kag,owner,"edit Panel",%[storage:"file_popup",visible:false,partexcept:grp]);
+		editPanel.hasAction = false;
+		editPanel.moveDis = 0;
+		editPanel.vertAlign = "bottom";
+		editPanel.show(_itemList[num].edit,%[direction:"right"]);
+		_targetNum = num;
+		editPanel.onLinkTrigger = hideEdit;
+		editPanel.action = this;
+		kag.addHook("onMouseUp",onMouseUp);	
+	}
+	function hideEdit(){
+		if(!isBlank(kag))
+			kag.removeHook("onMouseUp",onMouseUp);	
+		if(!isBlank(editPanel)){
+			editPanel.action = void;//防止无效化自身
+			invalidate editPanel;
+		}
+	}
+	function onMouseUp(x, y, button, shift){	// layer上的按钮先触发事件
+		var e = editPanel;
+		if(isBlank(e))return;
+		if(e.cursorX >0 && e.cursorX <e.width && e.cursorY >0 && e.cursorY <e.height)
+			return;
+		hideEdit();
+	}
+	function onSelect(target){
+		if((mode=="load" || mode =="qload") && !_moving &&!_copying){
+			var num = target.number;
+			num = getDataNumber(num);
+			tf.load_number = num;
+			kag.process(,"*doload");
+		}else super.onSelect(...);
+	}
+	function onUiload(elm){
+		_targetNum = tf.sl_num;
+		if(tf.sl_state == "move")	// 保持复制移动状态
+			_moving = true;
+		else if(tf.sl_state == "copy")
+			_copying = true;
+
+		mode = SystemHook.currentState;// load/save/qload
+		switch(mode){
+			case "load": 
+				elm.storage.unshift("file_load");
+				break;
+			case "save": 
+				elm.storage.unshift("file_save");
+				break;
+			case "qload": 
+				elm.storage.unshift("file_qload");
+				scroll = scrollMin = 0;
+				break;
+		}
+	}
+	function onUiloaded(elm){
+		switch(mode){
+			case "load": 
+			case "save": 
+				scrollMin = pageSize;
+				break;
+			case "qload": 
+				scroll = scrollMin = 0;
+				break;
+		}
+		super.onUiloaded(elm);
+	}
+	
+	//------------------------public---------------------
+	function pageMove(number){
+		// scroll = scroll+ (+number)* pageSize;
+		_stopScroll();
+		_startScroll(scroll,scroll+ (+number) * pageSize);
+	}
+	function onEditClick(num) {
+		tf.SaveDataEditCantDel = !(offset + (int)+num);
+		kag.process("custom.ks", "*saveload_edit");
+	}
+	function onPageSliderChanged(pos, drag) {
+		if(_ignoreSlider)return;
+		if (!drag) {	
+			var dest = Math.round(pos/pageSize);
+			dest *= pageSize;
+			_stopScroll();
+			_startScroll(scroll,dest);
+			updateSlider();	// 键盘可能会暂时更新位置，这里要重置
+		}
+		else {
+			scroll = pos;
+		}
+	}
+
+}
+class CustomQuickMenu extends QuickMenuLayerBase {
+	var help;
+	function CustomQuickMenu (){ // 这里不用字体，算了
+		help = new HelpTextManager("help_qkmu.txt", "help_base");
+		super.QuickMenuLayerBase(...);
+	}
+
+	// property canDropDown { getter { return !(locked || volumeShowing); } }
+	var  _volumeShowing = false;
+	property volumeShowing {
+		getter { return _volumeShowing; }
+	 	setter (v) {
+			updateVolumeState(_volumeShowing = !!v);
+			if(!!v)
+				setFocusToLink(names.volslider.linkNum,true);
+		}
+	}
+	function updateVolumeState(vis = volumeShowing) {
+		if (names.volchg !== void)
+			names.volchg.toggle = vis;
+		if (names.volbase !== void)
+			names.volbase.visible = vis;
+		if (names.volslider !== void) with (names.volslider) {
+			.visible = vis;
+		}
+	}
+
+	function canShowHelpTip(init) { return false; }
+
+	var attention, markpos, holdLeft;
+	function onUiloaded(elm, ui) {
+		super.onUiloaded(...);
+		help.mode="layer";
+		help.tipsTargetName = "help_base";
+		help.setup(this);
+	}
+	function onBlur(lay){
+		super.onBlur(...);
+		volumeShowing = false;
+		//volumeShow()
+	}
+	function onInactive(){
+		volumeShowing = false;
+	}
+	function _resetButton(elm){
+		super._resetButton(...);
+		names.qload.enabled = !isBlank(kag.bookMarks[0]);
+	}
+	
+	function showQloadPopup(vis) {	// vis: 显示还是隐藏 data:存档编号 或文件名（用于continue）
+		if(isBlank(kag.bookMarks[0]))return;
+		if (vis && createQLoadPopupLayer()) {
+			kag.qLoadPopupLayer.show(names.qload,%[data:0,direction:"up",parent:kag.fore.ui]);
+		} else if (!vis && !isBlank(kag,"qLoadPopupLayer")) {
+			kag.qLoadPopupLayer.hide(vis);
+		}
+	}
+}
+class CustomTitle extends DialogAction{
+	function showContinuePopup(vis){
+		if(!hasContinue())return;
+		if (vis && createQLoadPopupLayer()) {
+			kag.qLoadPopupLayer.show(owner.names["continue"],%[data:kag.getBookMarkFileNameBySystem("continue",true),direction:"right",parent:kag.fore.ui]);
+		} else if (!vis && !isBlank(kag,"qLoadPopupLayer")) {
+			kag.qLoadPopupLayer.hide(vis);
+		}
+	}
+}
+class CustomSystemAction extends SystemActionBase{
+	function CustomSystemAction(){
+		super.SystemActionBase();
+	}
+	function _rotateQLoad(){
+		Plugins.link("fstat.dll") if (typeof Storages.deleteFile != "Object");
+		var pos = 0;
+		while(!isBlank(kag.bookMarks[pos]) || pos <12){
+			pos++;	// 求出第一个空位或者是11号存档
+		}
+		while(--pos){	//空位到2号存档将 前一号存档移动到自己这里
+			var name = kag.getBookMarkFileNameAtNum(pos);
+			var beforeName = kag.getBookMarkFileNameAtNum(pos-1);
+			if(Storages.isExistentStorage(name)){// 存在则先删除
+				Storages.deleteFile(name);
+			}
+			//移动存档
+			kag.bookMarks[pos] = kag.bookMarks[pos-1];
+			kag.bookMarks[pos-1] = %[];
+			Storages.moveFile(beforeName,name);
+			kag.flushAutoPath();
+		}
+	}
+	function _saveContinue(){
+		if(inGameState()){
+			var fileName = kag.getBookMarkFileNameBySystem("continue",true);
+			kag.backHistoryLayer.hisViewLayer.quickSave(fileName);	// num为空 默认最后一个记录
+		}
+	}
+	function _title(){
+		SystemHook.kagJump(%[to:"title",back:"false"]);
+		_saveContinue();
+	}
+	function _exit(){
+		kag.saveSystemVariables();
+		_saveContinue();
+		kag.shutdown();
+	}
+	function conti(){
+		var fileName = kag.getBookMarkFileNameBySystem("continue",true);
+		kag.loadBookMarkFromFile(fileName);
+	}
+	function exit(){
+        if (global.currentDialog === void) {
+            askYesNo("AskExit", "confirm", _exit);
+        }
+	}
+	function title(){
+		askYesNo("AskTitle", "confirm", _title); 
+	}
+	function qsave(){
+		_rotateQLoad();
+		super.qsave();
+		kag.onModeChange();
+	}
+	
+}
+global.SystemActionClass = CustomSystemAction;
+// QLoadPopup
+SetSystemConfigDefaults(
+	%[
+	qlpopupName:"QLPopup",      // レイヤ名称
+	qlpopupUiStorage:"qlpopup", // uistorage
+	qlpopupFadeTime: 100,       // フェード・移動時間
+	qlpopupMoveDir:  "top",     // 移動方向
+	qlpopupMovePixel: 8,        // 移動距離
+	qlpopupThumbLayer: "thumb", // サムネレイヤ
+	qlpopupAbsolute: 2000000+1, // absolute
+	qlpopupDefaultParam:void,   // show時デフォルトパラメータ(or function)
+	]);
+
+
+function hasContinue(){
+	var contFile = kag.getBookMarkFileNameBySystem("continue",true);
+	return Storages.isExistentStorage(contFile);
+}
+
+global.saveload =function(){
+	return new CustomeSaveLoad(%[col:3,row:4,xoffset:419,yoffset:140]);
+};
+global.option=function(){ return new CustomOption();};
+global.title=function(){ return new CustomTitle();};
+global.QuickMenu =  CustomQuickMenu;
+with (SystemScript) {
+	.add("title","custom*gototitle");
+	.script("option");
+	.add("option.from.title",    "*start_title");
+	.add("option.from.game",     "*start_game");
+
+	.add("load","saveload*load");
+	.add("qload","saveload*qload");
+	.add("save","saveload*save");
+	.add("save.from.load","saveload*save");
+	.add("save.from.game","saveload*save");
+	// .add("load.from.title",    "*start_title"); // 不做区分
+
+	.script("cgmode");
+	.script("scenemode");
+	.add("scenemode.from.game",         "*restore");
+	.add("scenemode.from.recollection", "title*start");
+	.script("soundmode");
+}
+

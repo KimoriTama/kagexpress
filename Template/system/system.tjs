@@ -1,0 +1,1358 @@
+// ---------------------------------------------------------
+// 各種終了処理の登録・実行	各种结束处理的注册、执行
+
+class DelayedInvoker {
+	var _list = [];
+	function DelayedInvoker() {}
+	function finalize() {}
+	// 登録リストをクリアする		清空注册列表
+	function clear()      { _list.clear();            }
+	// 登録リストに追加する
+	function add(func)    { _list.add(func);          }
+	// 登録リストから削除する
+	function remove(func) { _list.remove(func, true); }
+	// 登録リストを実行する		执行注册列表
+	function invoke()     {
+		var temp = [];
+		temp.assign(_list);
+		for (var i = temp.count-1; i >= 0; i--) temp[i]();
+		this.clear();
+	}
+}
+// インスタンス		类实例,请作为唯一实例使用
+var terminator = new DelayedInvoker();
+
+// ---------------------------------------------------------
+// 遅延実行		延迟执行
+
+class DelayedTimer extends Timer {
+	function finalize() { super.finalize(...); }
+	var _owner, _action;
+	function DelayedTimer(owner, action, time) {
+		_owner = owner, _action = _action;
+		super.Timer(this, "onAction");
+		with (this) .capacity = 1, .interval = time, .enabled  = false;
+	}
+	function cancel()   { this.enabled = false; }
+	//	开启延迟执行
+	function trigger()  { this.enabled = true;  }
+	//	定时器的执行方法
+	function onAction() {
+		cancel();//关闭此定时器
+		if (_action == "") _owner();	// 不存在action则直接作为方法执行
+		else _owner[_action]();			//否则执行对象上的action
+	}
+}
+class DelayedTrigger extends AsyncTrigger {
+	function finalize() { super.finalize(...); }
+	function DelayedTrigger(owner, action, mode) {
+		super.AsyncTrigger(owner, action);
+		with (this) .cached = true, .mode = mode;
+	}
+}
+DelayedTrigger.instances = %[];
+//	建立一个延迟执行器， tag为键	callback为回调方法	，time为时间	priority 为优先级	，会作为DelayedTrigger.instances的tag键存储
+function setDelayedTrigger(tag, callback, time, priority = atmAtIdle) {
+	if (time < 0 || tag == "" || callback == "") return;
+	// 文字列の場合は関数に変更		对于字符串，将其更改为函数
+	if (typeof callback == "String")
+		callback = Scripts.eval(@"function() { Scripts.eval('${callback}'); }");
+	var inst;
+	if (time == 0) inst = new DelayedTrigger(callback, "", priority);
+	else           inst = new DelayedTimer(  callback, "", time);
+
+	DelayedTrigger.instances[tag] = inst;
+}
+//触发延迟执行器		外部方法
+function invokeDelayedTrigger(tag) {
+	var inst = (tag != "") ? DelayedTrigger.instances[tag] : void;
+	if (inst !== void) {
+		inst.cancel();	//	已经存在则会重新设置时间
+		inst.trigger();
+	}
+}
+//	只能使用一次的触发器
+class OnceDelayedTrigger extends DelayedTrigger {
+	var _func;
+	function finalize() {
+		delete global.DelayedTrigger.instances[this];
+		super.finalize(...);
+	}
+	function OnceDelayedTrigger(func, mode) {
+		global.DelayedTrigger.instances[this] = this;
+		super.DelayedTrigger(this, "onTrigger", mode);
+		_func = func;
+	}
+	function onTrigger() {
+		if (!(isvalid this)) return;
+		_func();
+		invalidate this;
+	}
+}
+//	建立一个只能用一次的触发器	callback 回调方法，imm是否立即触发  pri 优先级		外部方法
+function runOnceDelayedTrigger(callback, imm = true, pri = atmAtIdle) {
+	if (typeof callback == "String")	//字符串换为方法
+		callback = Scripts.eval(@"function() { Scripts.eval('${callback}'); }");
+	var trig = new OnceDelayedTrigger(callback, pri);
+	if (imm) trig.trigger();
+	return trig;
+}
+
+function SetSystemConfigDefaults(elm) {
+	var target = global.SystemConfig;
+	var ext = [];
+	ext.assign(elm);
+	for (var i = 0, cnt = ext.count; i < cnt; i+=2) {
+		var key = ext[i];
+		target[key] = ext[i+1] if (isBlank(target,key));
+	}
+}
+
+
+//----------------------------------------------系统信息注册相关逻辑（语言、钩子、音效等）---------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// 汎用レジストリ機構	通用注册表机制
+// ----------------------------------------------------------------------
+
+// レジストリ機構のベースクラス		注册表机构的基类
+//  スクリプトマップ: SystemScriptMap		脚本映射
+//  フック管理: SystemManager				钩子管理
+//  効果音管理: SystemSeManager				效果音管理
+// へ派生		以上为子类
+class SystemRegistory {
+	var _map = %[], _cached = %[];
+
+	function SystemRegistory() {}
+
+	// エイリアス参照用		用于别名引用
+	class _AliasItem_ {
+		function _AliasItem_(val) { alias = val; }
+		var alias;
+	}
+
+	// [virtual] タグの正規化			（虚方法）指令正则化
+	function tagNormalize(tag) {
+		if (typeof tag === "String") {
+			tag = tag.toLowerCase().trim();
+			if (tag.length > 0) return tag;
+		}
+		return (string)null;
+	}
+
+	// エイリアスを反映した先のタグを取得		获取指令的别名，不存在则返回本名
+	function tagApply(tag) {
+		tag = tagNormalize(tag);
+		while (_map[tag] instanceof "_AliasItem_") tag = _map[tag].alias;  // 可以设置多级别名，但最好不要这样做
+		return tag;
+	}
+	// 値を設定				设置值 不要同时设置别名和值
+	function set(tag, value) {
+		_map[tagNormalize(tag)] = value;
+	}
+	// エイリアスを張る				加上别名
+	function alias(tag, to) {
+		_map[tagNormalize(tag)] = new _AliasItem_(tagNormalize(to));
+	}
+	// 値取得			获取值
+	function get(tag)       { return        _map[tagApply(tag)]; }
+
+	// 定義済みかどうか調べる		检查是否已定义
+	function isDefined(tag) { return typeof _map[tagApply(tag)] !== "undefined"; }
+
+	// "."で区切った親階層を含めて "*" デフォルト値で検索する(キャッシュ機能つき)
+	// 基本的に最初に全部定義して，その後は読み取りのみの動作を
+	// 想定しているので動的に検索・値設定をするような時は set/alias したらclearCacheすること
+	//包括以“.”分隔的父层次结构，以“*”默认值搜索（带缓存功能）
+	//基本上先全部定义，然后只进行读取的动作
+	//因为设想了，所以在动态地进行检索值设定时，在set/alias后进行clearCache
+	function search(tag, method = _searchParent) {		//		可以指定搜索方法，不指定默认为 _searchParent
+		if (typeof tag !== "String" || tag.length === 0) return;
+		if (typeof _cached[tag] !== "undefined") return _cached[tag];	// 缓存中存在则直接使用缓存
+		var checks = method(tag);
+		for (var i = 0; i < checks.count; i++) {
+			var target = tagApply(checks[i]);
+			// 発見できたらキャッシュに保存して返す		发现则放入缓存返回
+			if (typeof _map[target] !== "undefined")
+				return setCache(tag, _map[target]);
+		}
+		return setCache(tag, void); // 結果無しでキャッシュに記録
+	}
+	// 親検索		 
+
+	/** 
+	* @description: 检索父层	获取其父层所需所有匹配符
+	* 例如: 输入a.b.c  返回[* , a.b.*, a.*, a.b.c]
+	* @param tag 需要检索的键
+	* @return 	匹配符的数组
+	*/
+	function _searchParent(tag) {
+		var ret = [ tag ];
+		var tmp = tag.split(".");
+		while (tmp.count > 1) {
+			tmp.erase(tmp.count-1);
+			ret.add(tmp.join(".") + ".*");
+		}
+		ret.add("*");
+		return ret;
+	}
+
+	// キャッシュ設定して返す		设置缓存
+	function setCache(tag, value) {
+		_cached[tag] = value;
+		return value;
+	}
+	// サーチ用キャッシュをクリア			清除缓存
+	function clearCache(tag) {
+		if (tag == ""){
+			_cached = %[];
+		}
+		else delete _cached[tag];
+	}
+	// 全データをクリア			清除全部数据
+	function clear() {
+		clearCache();
+		_map = %[];
+	}
+
+	/** abstract
+	* @description: 	load方法用的文本到值的转换方法
+	* @param val		字典中的值
+	* @return 			返回的的值，用于存入字典
+	*/	
+	function getValue(val)  { return val; }
+
+	/** abstract
+	* @description: 抽象方法 返回别名	
+	* @param val	返回的别名，不返回则不生成别名
+	* @return 返回的值用于设置别名
+	*/
+	function getAlias(val)  {}
+
+	// テキストファイルから読み込み。「#」はコメント 「foo.bar = hoge」形式	从文本文件导入。“foo.bar=hoge”形式 “#”是注释    
+	function load(file) {
+		if (!Storages.isExistentStorage(file)) return;
+		// 首先读取文件
+		var list = [];
+		list.load(file);
+
+		for (var i = 0; i < list.count; i++) {
+			var line = list[i].trim();
+			if (line[0] === "#" || line.length === 0) continue;	// #开头的注释行 和空行不管
+			var sp = line.split("=");
+			var c  = sp.count;
+			if (c === 1 || c === 2) {	//	键和值 至少存在一个
+				var tag = sp[0];
+				var val = getValue(sp[1]);		// value 转化
+				var ren = getAlias(val);		//尝试获取别名
+				if (ren === void) set(tag, val);	//存在别名则使用
+				else            alias(tag, ren);
+			} else {
+				dm(file + ": the entry is not correct(" + line + ")");
+			}
+		}
+	}
+}
+/*
+	控住系统语言项的类，包括菜单语言，提示语言，以及剧本语言等
+	不使用任何别名
+	剧本语言因为会发生频繁变动，因此单独放在缓存中
+*/
+class SystemLanguageManager extends SystemRegistory {
+	var _sysLangFile = "syslang";	//暂时定这个名字
+	
+	var _curLan; 	//当前读入的语言种类
+	var _type;	// 指定当前读入数据的类型 
+	var _mainLan;
+	var _subLan;
+	var _mainLanHook =[];
+	var _subLanHook = [];
+
+	property mainLan{	// 主语言
+		getter{
+			return _mainLan;
+		}
+		setter(lan){
+			if(lan == _mainLan)return;
+			_mainLan = lan;
+			foreach(_mainLanHook,function(k,v){
+				v(lan);
+			});
+		}
+	}	
+	property subLan{	//副语言
+		getter{
+			return _subLan;
+		}
+		setter(lan){
+			if(lan == _subLan)return;
+			_subLan =lan;
+			foreach(_subLanHook,function(k,v){
+				v(lan);
+			});
+		}
+	}
+
+	//覆盖父类方法，增加类别的区分，当值没有等号分割时作为一个大类，其后的所有项目作为其子项目，使用global来清除当前类别
+	function set(tag,val){
+		var v ;
+		v = val.trim() if val !== void;
+		if(v === "" || v === void){	// 只有键而没有值时
+			if(tag === "global") _type = void; // global 时清除当前类型
+			else _type = tag + ".";	//	否则设置为当前的类别
+		}else {	// 为键值对时
+			//void 加字符串不会影响所以直接相加
+			_map[tagNormalize(_curLan + "." + _type + tag)] = v;	// 类型做为前缀
+		}
+
+	}
+	// 加载配置语言信息的文件	带后缀的文件不存在且存在无后缀文件时使用默认的语言配置
+	function _loadLanFile(file){
+		var isLoad = false;
+		for(var i = 0;i<languageSubfixList.count;i++){
+			_type = void; // 加载每个文件前 清空类别
+			_curLan = languageSubfixList[i];
+			var fileName = file + "_" + _curLan + ".ini";
+			if(Storages.isExistentStorage(fileName))
+			{
+				isLoad = true;
+				load(fileName);
+			}
+		}
+		if(!isLoad && Storages.isExistentStorage(file+".ini")){
+			_curLan = defaultLan;	// 默认的语言配置
+			_type = void;
+			load(file+".ini");
+		}
+	}
+	// 了解前缀		默认的语言项	 主语言副语言		同步菜单
+	// 1. 加载系统内置语言向  2. 加载用户自定义  语言表单 	
+	// 脚本 语言信息 放入缓存 
+	function SystemLanguageManager(){
+		//加载配置信息
+		_loadLanFile(_sysLangFile);
+		_loadLanFile(customSyslanFileName); if(customSyslanFileName!="");
+		mainLan = defaultLan;
+		subLan = void;
+	}
+
+
+	function _loadScenarioText(fileName,keyName){
+		if(!Storages.isExistentStorage(fileName)){
+			setCache(keyName,[]);
+			return false;
+		}
+		var temp = [];
+		var list = [];
+		list.load(fileName);
+		for (var i = 0; i < list.count; i++) {
+			var line = list[i].trim();
+			if (line[0] === "#" || line.length === 0) continue;	// #开头的注释行 和空行不管
+			var data = line.split("\\");	//反斜杠 分隔语音和文本
+			if(data.count === 1 )	//没有语音数据，放入文本
+				temp.push(%[text:data[0]]);
+			else if(data.count === 2 )//存在说话人 和文本
+				temp.push(%[name:data[0],text:data[1]]);
+			else if(data.count === 3 )//存在语音数据
+				temp.push(%[voice:data[0],name:data[1],text:data[2]]);
+		}
+		setCache(keyName,temp);	// 语言名.剧本名  作为键
+		return true;
+	}
+
+	function _loadMultiScenario(storage){	// 加载多种语言的剧本信息
+		var isLoad = false;
+		for(var i = 0;i<languageSubfixList.count;i++){
+			_curLan = languageSubfixList[i];
+			var keyName =_curLan + "." + storage;
+			var fileName = storage + "_" + _curLan + ".txt";
+			isLoad = _loadScenarioText(fileName,keyName) || isLoad;
+		}
+		if(!isLoad){	// 如果没有加载到任何数据
+			_curLan = defaultLan;	// 默认的语言配置
+			_loadScenarioText (storage+".txt",_curLan + "." + storage);
+		}
+	}
+	//----------------------外部方法，获取系统配置语言和剧本配置语言--------------------------
+	function getSystemText(lan = mainLan,key,defaultText){
+		var res = get(lan + "." + key);
+		if(isBlank(res))return defaultText;
+		else return res;
+	}
+	function getScenarioText(lan = mainLan,storage,num){
+		var keyName = lan + "." + storage;
+		if(isBlank(_cached,keyName)){
+			_loadMultiScenario(storage);
+		}
+		if(_cached[keyName].count<=num)
+			throw new Exception(@"the scenario ${keyName} doesn't have enough lines to ${num}",Scripts.getTraceString());
+		var res = _cached[keyName][num];
+		if(isBlank(res.voice))		// 不存在语音数据时从其他语音中获取
+		{
+			for(var i = 0;i<languageSubfixList.count;i++){
+				lan = languageSubfixList[i];
+				keyName = lan + "." + storage;
+				var temp = _cached[keyName][num];
+				if(!isBlank(temp) && !isBlank(temp.voice))
+				{
+					res.voice = temp.voice;		
+					break;
+				}
+			}
+		} 
+		return res;
+	}
+	function addSubLanHook(func){
+		_mainLanHook.push(func);
+	} 
+	function addMainLanHook(func){
+		_subLanHook.push(func);
+	} 
+
+}
+var SystemLanguage = new SystemLanguageManager();
+// ---------------------------------------------------------
+// システムスクリプトストレージ			系统脚本存储
+// ---------------------------------------------------------
+
+// sysjump 時のとび先スクリプトを登録するレジストリ		注册sysjump时的跳转目标脚本的注册类
+// ・"storage * target" で，"*"区切りによるstorageとtargetを同時に記述できる	用 “storage*target”，同时记述以“*”分隔的storage和target
+// ・storage は ".ks"を省略できる	storage 省略了ks
+// ・下位階層でstorageが省略された場合は上位階層のstorageを使用して補完する		在下层省略了storage的情况下，使用上层的storage进行补充
+//   ex:		例如
+//      foo = "foo.ks"	
+//      foo.from.bar = "*start_from_bar"
+//      で登録されていた場合， get("foo.from.bar") すると
+//      %[ storage:"foo.ks", target:"*start_from_bar" ] を返す
+class SystemScriptMap extends SystemRegistory {
+	function SystemScriptMap() { super.SystemRegistory(...); }
+	// function finalize()        { super.finalize(...);        }
+
+	/** 
+	* @description: 	脚本注册器的获取脚本位置的方法，以 storage*target的形式写下目标脚本位置(storage可以不用写.ks)
+	* @param val		返回storage和target的字典
+	* @return 			
+	*/
+	function getValue(val)     {		
+		if (val === void) return %[];
+		val = val.trim();
+		if (val.length === 0) return %[];
+		if (val.indexOf("*") >= 0) {
+			var div = val.split("*");
+			var storage = div[0].trim();
+			if (storage.length == 0) storage = void;
+			else if (storage.indexOf(".ks") < 0) storage += ".ks";
+			return %[ storage:storage, target: "*"+div[1].trim() ];
+		}
+		return %[ storage: val.indexOf(".ks") < 0 ? (val + ".ks") : val ];
+	}
+	/** 
+	* @description: 获取名称对应的目标，如果名称对应的结果不存在storage，获取第一父级的storage
+	* 例如 a.b.c 只能获取a 无法获取 a.b 的storage,或者可以匹配带通配符的,例如 a.b.c 可以匹配 a.* 
+	* @param tag	匹配名称
+	* @return 
+	*/	
+	function get(tag) {
+		var ret = %[];
+		if (typeof tag !== "String") return ret;
+		var s = search(tag);
+		if (s !== void) (global.Dictionary.assign incontextof ret)(s, true);
+		if(isBlank(ret)){	//如果结果中没有存储
+			ret = get(tag.split(".")[0]);//则尝试获取	父级
+		}
+		else if (ret.storage === void && tag.indexOf(".") >= 0)	//如果结果中没有存储storage	且存在父级
+			ret.storage = get(tag.split(".")[0]).storage;//尝试获取	父级（只能是第一父级）有记录的storage
+		return ret;
+	}
+	function add(tag, st) { set(tag, getValue(st)); }
+	function script(name) { add(name, name);}
+
+	//添加脚本记录
+	function kagAddScript(elm) {
+		with (elm) add(.name, .storage + .target);
+		return 0;
+	}
+}
+// インスタンス
+var SystemScript = new SystemScriptMap();
+
+// ---------------------------------------------------------
+// システムスクリプトフック		系统脚本挂钩
+// ---------------------------------------------------------
+
+// フック(syshook)やジャンプ(sysjump)を提供する
+//提供挂钩或跳转
+class SystemManager extends SystemRegistory {
+	function SystemManager() { super.SystemRegistory(...); }
+
+	//这个类中 map 每个值 存储的是一个数组,数组内容是所有回调函数
+	var sorted = %[];			//存储是否排过序
+	function add(tag, f, priority = 0) {
+		set(tag, []) if (!isDefined(tag));
+		var fncs = get(tag);
+		fncs.add([ priority, f]);//0号位 是优先级  1号位是真正的值
+	}
+	function erase(tag) {
+		if (!isDefined(tag)) return;
+		var fncs = get(tag);
+		fncs.clear();
+	}
+	function getArgs(args*) {
+		var ret = [];
+		ret.assign(args);
+		return ret;
+	}
+	//	存贮指令 输入kag指令，pending为空则直接执行，否则放入pending中
+	function store(tag, elm) {
+		if (_pending === void) return kag.tagHandlers[tag](elm);
+		elm.tagname = tag;
+		_pending.add(elm);
+	}
+
+	var _pending = void;
+
+	/** 
+	* @description: 	用于将存储方法设为延迟指令的中转方法
+	* 方法先把 _pending 设为数组开启存储，方法结束后设为 void 结束存储
+	* @param name	需要执行的方法名
+	* @return 	void
+	*/
+	function pending(name, *) {
+		_pending = [];				//	仅在此处可以存入到pending 中， 目的是一次性插入到kag中
+		this[name](*);
+		for (var i = _pending.count-1; i >= 0; i--) {
+			var elm = _pending[i];
+			kag.conductor.pushTag(elm);
+		}
+		_pending = void;
+	}
+
+	/** 
+	* @description: 执行方法
+	* @param elm.target 方法
+	* @param elm.args	方法参数
+	* @return 0
+	*/
+	function execDelay(elm) {
+		with (elm) .target(.args*);
+		return 0;
+	}
+	/** 
+	* @description: 	存储指定键下的方法
+	* 用参数的tag获取目标值，未排序则先排序		之后 存储 sysexec（就是上面的execdelay） 指令。
+	* @param tag		想要存储指令的键
+	* @return 		void
+	*/	
+	function _exec(tag, *) {
+		if (!isDefined(tag)) return void;
+		var fncs = get(tag);
+		var ntag = tagNormalize(tag);
+		if (!sorted[ntag]) {
+			fncs.sort(function(a,b) { return a[0] < b[0]; }, true);
+			sorted[ntag] = true;
+		}
+		for (var i = fncs.count-1; i >= 0; i--) {
+			var f = fncs[i][1];
+			switch (typeof f) {
+			case "String":		//	值为字符串则继续向下执行
+				_exec(f, *);
+				break;
+			case "Object":
+				if (f instanceof "Function") store("sysexec", %[ name:tag, target:f, args:getArgs(*)]);
+				break;
+			}
+		}
+	}
+	
+
+	/** 
+	* @description: 	跳转到目标剧本(在SystemScript中存储)，然后存储各种钩子,使用此方法会自动将currentState设为to的状态
+	* 触发的钩子包括:	${from}.leave  back  change.${from}.${to}   syscurrent(指令)  ${to}.enter.${from}
+	* @param from	从何处跳转
+	* @param to		跳转到何处	(以 from 和 to从SystemScript中获取目标)
+	* @param back	是否触发back钩子
+	* @param call	是否为调用
+	* @return 		void
+	*/
+	function _jump(from, to, back,call) {
+		var storage, target, valid = false;
+		if (to != "") {
+			// 移動先スクリプトを取得	获取目标脚本
+			var bind = SystemScript.get(to + (from != "" ? (".from." + from) : ""));
+			if (bind !== void) with (bind) {
+				storage = .storage;
+				target  = .target;
+				valid   = (storage != "" || target != "");
+			}
+		}
+		dm(@"sysjump:from:${from},to:${to},storage:${storage},target:${target}") if (kag.debugLevel >= tkdlSimple);
+		if(call){
+			if(!isBlank(stateBeforeCall))
+				throw new Exception("call stack can only have 1 depth!");
+			stateBeforeCall = currentState;
+			kag.callExtraConductor(storage, target,_restoreState);
+		}else if(valid)
+			// 先にprocessを呼ばないとinsertTagが正常に機能しない		如果不先调用process，insertTag将无法正常工作
+			kag.process(storage, target) ;
+
+		// 各種フック		存储各种钩子
+		_exec(from + ".leave", to) if (from != "");
+
+		_exec("back",    from, to) if (back);
+		_exec("change."+from+"."+to) if (from != "" && to != "");
+
+		if (to != "") {
+			store("syscurrent", %[ name:to ]);		// 这里会记录系统状态	
+			_exec(to   + ".enter", from);
+		}
+
+		if (!valid) {
+			System.inform(@'sysjump:from "${from}" to "${to}" is not registerd');
+			_jump(void, "title");
+		}
+	}
+
+
+	var cobjs = [];
+	class _JumpOrCall {
+		var storage, target, iscall;
+		function _JumpOrCall(elm, defcall) {	// 参数中storage缺失ks会自动补充
+			iscall = defcall;
+			iscall =  +elm.call if (elm.call !== void);
+			iscall = !+elm.jump if (elm.jump !== void);
+			storage = elm.storage;
+			if (typeof storage == "String" &&
+				storage.length > 0 &&
+				storage.indexOf(".ks") < 0)
+				storage += ".ks";
+			target  = elm.target;
+		}
+		function invoke() {
+			with (kag.conductor) {
+				.callLabel("") if (iscall);//压栈
+				.loadScenario(storage) if (storage !== void);
+				.goToLabel(target);
+			}
+		}
+	}
+	//参数需要包含 storage target ，jump 和call为布尔， 决定是如何调用	返回一个建立的处理函数，会进入到对应的目标处
+	function getJumpOrCall(elm) {	//在 cobjs 注册一个
+		var co = new _JumpOrCall(elm);
+		cobjs.add(co);
+		return co.invoke;//返回的是方法
+	}
+
+	function addJumpOrCall(tag, storage, target, iscall, priority) {
+		add(tag, getJumpOrCall(%[storage:storage, target:target, call:iscall]), priority);
+	}
+
+	function kagAdd(elm)  {
+		add(elm.name, getJumpOrCall(elm, true), elm.priority);
+		return 0;
+	}
+
+	/** 
+	* @description: 类似于_exec，但不存储直接执行指令
+	*	和下面不同，会先获取到全部方法再执行，而不是一次先全部获取再依次执行
+	* @param elm.name	指令的键名
+	* @param elm.*	指令的其他参数
+	* @return 	无
+	*/
+	function kagExec(elm) {
+		pending("_exec", elm.name, elm);
+		return 0;
+	}
+	/** 
+	* @description: 清空当前存储的方法，用tag名获取 目标值，然后(立即)执行方法
+	* @param tag	获取注册方法的键名
+	* @param * 		方法参数
+	* @return 	void
+	*/
+	function exec(tag,*) { _pending = void; _exec(...); }	
+
+	/** 
+	* @description: 	用参数获取跳转目标，然后存储方法
+	* 和下面不同，获取到的钩子会先存储，执行开始才会触发
+	* @param elm.from	来源状态
+	* @param elm.to		目标状态
+	* @param elm.back	
+	* @param elm.call 是否作为带栈的调用
+	* @return 
+	*/
+	function kagJump(elm) {
+		if(isBlank(elm.from))
+			elm.from = currentState;
+		if(elm.back && isBlank(elm.to))
+			elm.to = lastState;
+		pending("_jump", elm.from, elm.to, elm.back,elm.call);
+		return 0;
+	}
+
+	/** 
+	* @description: 	清空当前存储的方法，用参数获取跳转目标，然后存储(执行)方法
+	* 和上面不同，获取到的钩子会立即执行
+	* @param from	
+	* @param to		
+	* @param back
+	* @return 
+	*/
+	function jump() { _pending = void; _jump(...); }
+
+	//---系统当前状态相关的---
+
+	var currentState, lastState,stateBeforeCall;
+	function _restoreState(){
+		currentState = stateBeforeCall;
+		stateBeforeCall = void;
+	}
+	function kagCurrent(elm) {
+		lastState    = currentState;
+		currentState = tagNormalize(elm.name);
+		kag.callHook("onSystemHookStateChanged", currentState); 
+		return 0;
+	}
+	function onStore(dic){
+		dic.systemCurrentState = currentState;
+	}
+	function onRestore(dic){
+		lastState = null;
+		stateBeforeCall = void;
+		currentState = dic.systemCurrentState;
+	}
+
+}
+/*
+	使用方法1:
+	1. scriptMap 注册相关的脚本 ，可以jump或者call
+	2. 使用 sysjump进行 跳转，会触发相关的钩子
+	----------------------
+	使用方法2 
+	1. 直接使用 addsyshook注册脚本，可以jump或者call
+	2. 使用 syshook进行跳转 ， 不会触发钩子
+*/
+var SystemHook = new SystemManager();
+with (SystemHook) {
+	global.systemJump = .jump;
+	addKagHandler("addsyshook", .kagAdd,SystemHook);	//注册跳转(或调用)的脚本
+	addKagHandler("syshook",    .kagExec,SystemHook);	// 执行注册的方法
+	addKagHandler("sysexec",    .execDelay,SystemHook);//执行方法
+	addKagHandler("syscurrent", .kagCurrent,SystemHook);	// 设置当前系统状态
+	addKagHandler("sysjump",    .kagJump,SystemHook);  // 触发跳转，触发注册的钩子
+	addKagHookCallback("onRestore",.onRestore,SystemHook);
+	addKagHookCallback("onStore",.onStore,SystemHook);
+	
+}
+
+var inSystemMenuStorages = %[];
+function setSystemMenuStorage(storage, inMenu = true) {
+	var name = storage.toLowerCase();
+	inSystemMenuStorages[name] = inMenu if (name != "");
+}
+// システムメニュー中かどうか  是否在游戏状态中,即使在游戏中打开菜单存档履历之类的也会算作在游戏中，严格判断请使用currentState
+function inGameState() {
+	var cur = kag.mainConductor.curStorage;
+	cur = (typeof cur === "String") ? cur.toLowerCase() : "";
+	dm("gamestate:"+cur);
+	if(!isBlank(cur) && !inSystemMenuStorages[cur])	// 当前主控器剧本非空且不为系统菜单内
+		return true;
+	return false;
+}
+
+// フォーカスを外す
+function unsetFocusedLayer(win) {
+	win.focusedLayer = null;
+}
+
+// 上書き
+function inTitleMenu(kag) {
+	return SystemHook.currentState == "title";
+}
+
+
+
+/*
+ * サブ画面の呼び出し		调用子路径
+ */
+function startSubSystem(isExtra, tag)
+{
+	with (kag) {
+		var src = SystemScript.get(tag);
+		// .hideHistory() if (.historyShowing);	//隐藏履历层
+		if (!isExtra) .process(  src.storage, src.target,, true);
+		else .callExtraConductor(src.storage, src.target);
+	}
+}
+
+
+// ---------------------------------------------------------
+// システム定義ファイル管理用
+// ---------------------------------------------------------
+
+class SystemDefFileManBase extends SystemRegistory {
+	// function finalize() { super.finalize(...); }
+	function SystemDefFileManBase(file) {
+		super.SystemRegistory();
+		load(file);
+	}
+
+	function getAlias(val)     { return (typeof val === "String") ? val : void; }
+	function getValue(val)     {
+		if (val === void) return %[];
+		val = val.trim();
+		if (val[0] === "@") return val.substr(1);	// 以@开头代表是别名，返回字符串
+		if (val.length === 0) return %[];	
+		return makeValue(val.split(":"));
+	}
+
+	// stub
+	function makeValue(list) {} /* virtual */
+
+	// 自由度の高い検索(hoge.fuga.ugo は *.ugo や *.fuga.* にマッチ)
+	function _searchList(tag) {
+		var ret = [ tag ], pos = [ 0 ];	//p 用来记录每段的长度(包括点),p的数组长度比tmp多一个
+		var tmp = tag.split(".");
+		for (var p = 0, i = 0; i < tmp.count; i++, pos[i] = p++) p += tmp[i].length;
+		for (var i = 1; i < tmp.count; i++)
+			for (var j = tmp.count - i; j >= 0; j--)
+				ret.add(tag.substr(0, pos[j]) + ((j>0)?".*":"*") + tag.substr(pos[j+i]));
+		ret.add("*");
+		return ret;
+	}
+
+	function get(tag) {
+		var ret;
+		if (typeof tag === "String") ret = super.search(tag, _searchList);
+		return ret !== void ? ret : %[];
+	}
+	
+}
+
+// ---------------------------------------------------------
+// システムトランジション管理
+// ---------------------------------------------------------
+
+class SystemTransManager extends SystemDefFileManBase {
+//	function finalize() { super.finalize(...); }
+	var defaulttrans = "crossfade";
+	function SystemTransManager(file) { super.SystemDefFileManBase(...); }
+
+	// split array value to dic
+	function makeValue(list) {
+		var ret = %[ method:(list[1] != "") ? (list[1].trim()) : defaulttrans ];
+		var time = list[0];
+		time = time.trim() if (time != "");
+		ret.time = +time   if (time != "");
+		if (list[2] != "") {
+			ret.layer = list[2].trim();
+			ret.wait = true;
+		}
+		return ret;
+	}
+	function trans(elm, handlers) {
+		var name = elm.name, isenv = elm.env;
+		removeTagParam(elm, "name");
+		removeTagParam(elm, "env");
+		var val = get(name);
+		if (typeof val == "Object") {
+			// envinit の method を上書き
+			if (val.method != "" && typeof global.world_object == "Object") try {
+				var trans = global.world_object.env.getTransObject(val.method);
+				if (trans !== void) {
+					var time = val.time;
+					delete val.method;
+					(Dictionary.assign incontextof val)(trans, false);
+					if (val.method == "") val.method = defaulttrans;
+					val.time = time;
+				}
+			} catch {}
+			(Dictionary.assign incontextof elm)(val, false);
+		}
+		var mytrans, fore, back;
+		if (elm.layer != "") {
+			// [XXX]
+			fore = kag.getLayerPageFromElm(elm, false);
+			back = kag.getLayerPageFromElm(elm, true);
+			if (!fore.visible) with (fore) {
+				with (back) fore.setPos(.left, .top);
+				if (fore instanceof "MessageLayer") {
+					.setPosition(%[ frame:"", color:0, opacity:0, width:back.width, height:back.height, visible:true ]);
+					mytrans = true;
+				} else {
+					dm("*** systrans unsupported non-message layer");
+					.setSize(.width, .height);
+					.fillRect(0, 0, .width, .height, .neutralColor);
+					.visible = true;
+				}
+			} else if (!back.visible) with (back) {
+				with (fore) back.setPos(.left, .top);
+				if (back instanceof "MessageLayer") {
+					.setPosition(%[ frame:"", color:0, opacity:0, width:fore.width, height:fore.height, visible:true ]);
+					kag.insertTag("position", %[ layer:elm.layer, page:"fore", visible:false ]);
+					mytrans = true;
+				} else {
+					dm("*** systrans unsupported non-message layer");
+					.setSize(.width, .height);
+					.fillRect(0, 0, .width, .height, .neutralColor);
+					.visible = true;
+				}
+			} else if (fore.left   != back.left   ||
+					   fore.top    != back.top    ||
+					   fore.width  != back.width  ||
+					   fore.height != back.height) {
+				dm("*** systrans unmached layersize");
+				delete elm.layer;
+			} else {
+				mytrans = true;
+			}
+		}
+		SystemHook.exec("systrans." + name); // 直実行なので .ks のフックは実行できないことに注意
+		//dm("systrans", elm.method, elm.time);
+		if (isenv && typeof kag.addNextTag == "Object") {
+			addTagParam(elm, elm.method, true);
+			removeTagParam(elm, "method");
+			// world系の改訂に追従するための対応
+			addTagParam(elm, "sync", true);
+			elm.tagname = "endtrans";
+			kag.addNextTag(elm.tagname, elm);
+			return 0;
+		}
+		if (mytrans && typeof kag.normalizeTransitionParams == "Object" && !kag.isD3D) {
+			var method =      kag.normalizeTransitionParams(elm);
+			back.stopTransition();
+			kag.forEachEventHook('onPreTransition');
+			with (fore) {
+				.transWithChildren =  elm.children === void || +elm.children;
+				.transExchange     = +elm.exchange;
+				.beginTransition(method, .transWithChildren, back, elm);
+				.onTransitionCompletedHook = this.onTransitionCompleted;
+			}
+			return (myTransWait incontextof kag)(fore, elm.canskip, +elm.wait); //[XXX]
+		}
+		return handlers.trans(elm);
+	}
+
+	// cf. waitSingleTransition(target, canskip, wait)
+	function myTransWait(target, canskip, wait=0) {
+		var name = 'trans_' + (string)target;
+		if((canskip === void || +canskip) && clickSkipEnabled)
+		{
+			// スキップできる場合
+			if(skipMode && effectspeed==0)
+			{
+				// スキップ動作中
+				target.stopTransition(true);
+				return 0; // 自動移動を停止させてすぐに返る
+			}
+			conductor.wait(%[
+				click : function (target)
+				{
+                    updateBeforeCh = 1;
+					if (isvalid target) {
+						target.stopTransition(true); // アクションを停止
+					}
+				} incontextof this,
+				'click_arg' => target, // ハンドラへの引数
+				name => function(arg)
+				{
+					updateBeforeCh = 1;
+					return arg;
+				} incontextof this,
+				name + "_arg" => wait
+				]);
+		}
+		else
+		{
+			conductor.wait(%[
+				name => function(arg)
+				{
+					updateBeforeCh = 1;
+					return arg;
+				} incontextof this,
+				name + "_arg" => wait
+				]);
+		}
+		return -2;
+	}
+	function onTransitionCompleted(target, dest, src) {
+		with (target) {
+			// atEndOfTransition(src, transWithChildren, transExchange);
+			if (src) {
+				.assign(src, false);
+				.exchangeInfo();
+				// swapMessageLayer
+				var id = .id;
+				with (.window) {
+					.fore.messages[id] <-> .back.messages[id];
+					.current = (.currentPage?.back:.fore).messages[.currentNum]; // current は設定し直し
+				}
+				.subLayersReAbsolute(); // [XXX]
+				.comp.subLayersReAbsolute(); // [XXX]
+			}
+			// window.onLayerTransitionCompleted(this, dest, src);
+			.window.conductor.trigger('trans_' + (string)target);
+			.window.forEachEventHook('onExchangeForeBack');
+		}
+	}
+}
+
+//SystemTransManager.instance = new SystemTransManager("systrans.ini");
+/*
+// systrans
+addKagHandler("systrans", function(elm) {
+	SystemHook.pending("_exec", elm.name, elm);
+	return SystemTransManager.instance.trans(elm, kag.tagHandlers);
+}, false);*/
+
+// ---------------------------------------------------------
+// システム効果音管理
+// ---------------------------------------------------------
+
+class SystemSeManager extends SystemDefFileManBase {
+	// function finalize() { super.finalize(...); }
+	var defaultbuf;
+	function SystemSeManager(file, db = 3) {
+		defaultbuf = db;
+		super.SystemDefFileManBase(file);
+	}
+
+	// split array value to dic
+	function makeValue(se) {
+		return %[ storage: se[0].trim(), buf: (se[1] != "") ? +(se[1].trim()) : defaultbuf];
+	}
+	function play(elm) {
+		elm = get(elm) if (typeof elm == "String");
+		with (elm) {
+			if (.storage == "") return;
+			var se = kag.se[ +.buf ];
+			if (se === void) return;
+			se.setOptions(%[ gvolume: .volume ]) if (.volume !== void);
+			se.play(     %[ storage: .storage ]);
+		}
+	}
+	function state(elm) {
+		elm = get(elm) if (typeof elm == "String");
+		return (elm.storage !== void) ? kag.se[ +elm.buf ].status : "";
+	}
+	function add(tag, storage, channel) {
+		var val = storage;
+		val += ":" + channel if (channel !== void);
+		set(tag, getValue(val));
+	}
+	function setTargetSE(target, base, action) {
+		var tag = @"&base;.&action;";
+		var se = get(tag);
+		if (se === void || se.storage == "" || target[action + "se"] !== void) return;
+		target[action + "se"   ] = se.storage;
+		target[action + "sebuf"] = se.buf;
+	}
+	// uiload時にボタンに効果音を割り当てる		在uiload时为按钮指定效果音
+	function setUiloadSE(names, dict, place) {
+		for (var i = 0; i < names.count; i++) {
+			var name = names[i], target = dict[name];
+			if (target === void) continue;
+			with (target) {
+				name = .name   if (.name   != "");	// 优先最低是自身name
+				name = dict[.copy].sename if (.copy != "" && dict[.copy] !== void && dict[.copy].sename != ""); //其次是复制对象的sename
+				name = .sename if (.sename != "");//最高是sename
+			}
+			switch (target.class) {
+			case "part": case "base": case "layer": continue;
+			}
+			var base = place + "." + name;
+			setTargetSE(target, base, "click");
+			setTargetSE(target, base, "enter");
+			setTargetSE(target, base, "leave");
+		}
+	}
+	// 選択肢に効果音を割り当てる	为选项指定效果音
+	function setElementSE(elm, defname, list) {
+		if (elm === void || list === void) return;
+		var base = (elm.sename != "") ? elm.sename : defname;
+		for (var i = 0; i < list.count; i++)
+			setTargetSE(elm, base, list[i]) if (list[i] != "");
+	}
+}
+SystemSeManager.instance = new SystemSeManager("sysse.ini");
+with (SystemSeManager.instance) {
+	global.getSysSE    = .get;
+	global.playSysSE   = .play;
+	global.stateSysSE  = .state;
+	global.uiloadSysSE = .setUiloadSE;
+	global.elementSysSE= .setElementSE;
+	global.addSysSeStorage = .add;
+}
+
+
+// ---------------------------------------------------------
+// デバッグユーティリティ
+
+property hasDebugUtil { getter {
+	var ret = false, script = "debugutil.tjs";
+	try {
+		if (Storages.isExistentStorage(script)) {
+			KAGLoadScript(script);
+			ret = true;
+		}
+	} catch {}
+//	dm("hasDebugUtil");
+	return (&hasDebugUtil = ret);
+} }
+
+property     skipToScenarioLine { getter {
+	return (&skipToScenarioLine = hasDebugUtil ? global.DebugSkipToScenarioLine : function {});
+} }
+property     editCurrentLineScenario { getter {
+	return (&editCurrentLineScenario = hasDebugUtil ? global.DebugEditCurrentLineScenario : function {});
+} }
+property     startFlagEdit { getter {
+	return (&startFlagEdit = hasDebugUtil ? global.FlagEditBase.menuItemClick : function {});
+} }
+property     selectAutoLabelStore { getter {
+	return (&selectAutoLabelStore = hasDebugUtil ? global.DebugAutoStoreBackDialog.menuItemClick : function {});
+} }
+property     editCurrentVoiceLabel { getter {
+	return (&editCurrentVoiceLabel = hasDebugUtil ? global.DebugEditCurrentVoiceLabel : function {});
+} }
+property                         copyCurrentVoiceToClipBoard { getter {
+	return hasDebugUtil ? global.copyCurrentVoiceToClipBoard   : function { global.Clipboard.asText = "！読み込みに失敗しました！"; } incontextof global;
+} }
+property                         copyCurrentEnvInfoToClipBoard { getter {
+	return hasDebugUtil ? global.copyCurrentEnvInfoToClipBoard : function { global.Clipboard.asText = "！読み込みに失敗しました！"; } incontextof global;
+} }
+property     captureCurrentScreen { getter {
+	return (&captureCurrentScreen = hasDebugUtil ? global.DebugCaptureCurrentScreen : function {});
+} }
+property     editBugReport { getter {
+	return (&editBugReport = hasDebugUtil ? global.editBugReport : function {});
+} }
+property     myExecStorage { getter {
+	return (&myExecStorage = hasDebugUtil ? global.myExecStorage : function {});
+} }
+property     systemReboot { getter {
+	return (&systemReboot = hasDebugUtil ? global.systemReboot : function {});
+} }
+
+
+// execDialog上書き
+property execDialog { getter {
+//	dm("execDialog");
+	var ret, noarc = Storages.isExistentStorage(System.exePath+"data/startup.tjs");
+	if (hasDebugUtil && noarc) ret = global.myExecDialog;
+	else { KAGLoadScript("ExecDialog.tjs"); ret =global.execDialog; }
+	return (&execDialog = ret);
+} }
+property     execPopup { getter {
+	return (&execPopup = hasDebugUtil ? global.myExecPopup : function {});
+} }
+property     debugMessageReceived { getter {
+	return (&debugMessageReceived  = hasDebugUtil ? global.DebugMessageReceived : function {});
+} }
+
+
+// 系统错误时的处理
+function onSystemExceptionHandlerHook(e) {
+	if (typeof System.waitForAppLock != "Object") return;
+	try {
+		var message = ((string)e.message);
+		if (inGameState(kag) && (message.indexOf("ビットマップ用メモリ") >= 0 ||
+								 message.indexOf("Bitmap : ") > 0)) { // [XXX] for krkrZ english error message
+			System.doCompact();
+			with (kag) {
+				var file = .getBookMarkFileNameBySystem("emergency");
+				if (.saveBookMarkToFile(file)) {
+					.saveSystemVariables();
+					// System.confirm() は systemEx.dll の関数で waitForAppLock とセットで常に使える
+					var text = GetSystemConfigItem("EmergencyRebootConfirm", "ビットマップ用メモリが確保できませんでした。\nゲームを再起動して復帰処理を試みますか？")
+						+ (debugWindowEnabled?"":GetSystemConfigItem("EmergencyRebootExit", "\n（いいえを押すとゲームを強制終了します）"));
+					var reboot = System.confirm(text, System.title, kag);
+					if (reboot) {
+						systemReboot(true);
+					} else {
+						if (typeof Storages.deleteFile == "Object") {
+							Storages.deleteFile(file);
+						} else {
+							try { [].save(file); } catch {}
+						}
+						System.terminate() if (!debugWindowEnabled);
+					}
+					return true;
+				}
+			}
+		}
+	} catch {}
+}
+function checkEmergencySaveData() {
+	var em = "emergency";
+	var exist = Storages.isExistentStorage, getfn = getBookMarkFileNameBySystem;
+	var resume = getfn(em);
+	if (exist(getfn("anchor")) && exist(resume)) {
+		var obj;
+		try { obj = evalBookMarkFromFile(resume); } catch {}
+		if (typeof obj == "Object") {
+			try { kag.tagHandlers.syscover(%[ visible:false ]); } catch {}
+			SystemHook.kagCurrent(%[name:"game"]);
+			SystemHook.exec("execdialog.start");
+
+			loadFunction(em);
+			startAnchorEnabled = true;
+		}
+	}
+} /*incontextof kag*/
+
+class SystemActionBase {	// todo 以后这里参照ex 加一个primaryclick右键的情况
+	function SystemActionBase() {
+	}
+	function finalize() {}
+	function _makeStable(){
+		if(kag.autoMode)kag.cancelAutoMode();
+		if(kag.skipMode)kag.cancelSkip();
+		if(!kag.inStable)kag.skipToPage();
+	}
+	property qsaveBookmarkNumber { getter { return 0; } }
+	//screen  about exit title  click rclick hide option	save load presave 	qsave qoload skip backlog auto next prev 	vreplay
+	
+	function backlog() {
+		if(!kag.historyEnabled)return;	// 禁止显示不管
+		if(SystemHook.currentState != "game" && SystemHook.currentState != "backlog" )
+			return;
+		if(!kag.inStable) //非稳定状态不响应
+			return;
+		switch(SystemHook.currentState){
+			case "game":
+				_makeStable(); 	// 其实不太可能处于这种状态，姑且写一下
+				return SystemHook.kagJump(%[from:"game",to:"backlog",call:true]); 
+			case "backlog":return kag.process("","*back");
+		}
+		//.process("", "*back");
+		// startSubSystem(true,"backlog");
+	}
+	function option(){
+		if(SystemHook.currentState!="option"){
+			_makeStable(); 
+			return SystemHook.kagJump(%[to:"option",call:true]); // 以当前状态为准进行跳转
+		}
+		else return kag.process("","*back");
+		//.process("", "*back");	//标准方式
+	}
+	function hide(){
+		if(kag.messageLayerHiding)
+			kag.showMessageLayerByUser();
+		else 
+			kag.hideMessageLayerByUser();
+	}
+	function auto(mode){ // 加参数可以强行保持一致
+		if(isBlank(mode))
+			mode = !kag.autoMode;
+		if((mode && kag.autoMode) || (!mode && !kag.autoMode))
+			return;
+		if(mode==1){
+			if(kag.skipMode>0 && kag.skipMode<4)
+				kag.cancelSkip();
+			kag.enterAutoMode();
+		}
+		else kag.cancelAutoMode();
+	}
+	function skip(mode){ // 加参数可以强行保持一致
+		if(kag.skipMode>3) return; // 特殊快进模式无法处理
+		if(isBlank(mode))
+			mode = !kag.skipMode;
+		if((mode && kag.skipMode) || (!mode && !kag.skipMode))
+			return;
+		if(mode){
+			if(kag.autoMode)kag.cancelAutoMode();	//在自动模式先取消自动
+			kag.skipToStop();
+		}
+		else kag.cancelSkip();
+	}
+	function back(){//向前回滚一句
+		if(SystemHook.currentState!="game")return;
+		if(!kag.isHistoryOfStoreAlive(0))return;
+		askYesNo("--", "confirm", kag.goBackYes); //todo 以后改下问句
+	}
+	function prev(){ // 上一个选项
+	}
+	function next(){} // 下一个选项
+	
+	function doload(num){
+		kag.loadBookMarkWithAsk(num);
+	}
+	function title(){
+		askYesNo("AskTitle", "confirm", kag.goToStart); 
+	}
+	function exit(){
+		kag.close();
+	}
+	function load(){
+		if(SystemHook.currentState!="load"){
+			_makeStable(); 
+			return SystemHook.kagJump(%[to:"load",call:true]);// 以当前状态为准进行跳转
+		 }
+		else return kag.process("","*back");
+	}
+	//	已经处于该状态 会点击右键返回  
+	function save(){
+		if(SystemHook.currentState!="save"){
+			_makeStable(); 
+			return SystemHook.kagJump(%[to:"save",call:true]);// 以当前状态为准进行跳转
+		 }
+		else return kag.process("","*back");
+	}
+	function _qload(num = qsaveBookmarkNumber){
+		kag.loadBookMark(num);
+	}
+	function qload(){
+		if(isBlank(kag.bookMarks[qsaveBookmarkNumber]))return;
+		askYesNo("AskTitle", "confirm",_qload);
+	}
+	function qsave(){
+		var fileName = kag.getBookMarkFileNameAtNum(qsaveBookmarkNumber);
+		kag.backHistoryLayer.hisViewLayer.quickSave(fileName);	// num为空 默认最后一个记录
+		kag.updateBookMarkInfo(qsaveBookmarkNumber);
+	}
+	function fullScreen(){	
+		kag.changeFullScreenOrWindow(true);
+	}
+	function window(){
+		kag.changeFullScreenOrWindow(false);
+	}
+}
+var SystemAction;
+var SystemActionClass = SystemActionBase;
+
+//---------------------------------------数据定义区域--------------------------------------------------
+with (SystemScript) {
+	.script("title");
+
+	.script("backlog");
+	.add("backlog.from.game",     "*start");
+
+	.script("option");
+	.add("option.from.title",    "*start_title");
+	.add("option.from.game",     "*start_game");
+
+	.script("load");
+	// .add("load.from.title",    "*start_title"); // 不做区分
+
+
+	.script("save");
+	.add("save.from.title",    "*start_title");
+	.add("save.from.load",     "*start_load");
+	.add("save.from.game",     "*start_load");
+	.add("save.sysfrom.game",  "*sysfrom_game");
+	.add("game.from.save",     "save*return");
+
+	.script("cgmode");
+	.script("scenemode");
+	.add("scenemode.from.game",         "*restore");
+	.add("scenemode.from.recollection", "title*start");
+	.script("soundmode");
+
+	addKagHandler("addsysscript", .kagAddScript);
+}
+
+setSystemMenuStorage("backlog.ks");
+setSystemMenuStorage("load.ks");
+setSystemMenuStorage("save.ks");
+setSystemMenuStorage("func.ks");
+setSystemMenuStorage("first.ks");
+setSystemMenuStorage("title.ks");
+setSystemMenuStorage("option.ks");

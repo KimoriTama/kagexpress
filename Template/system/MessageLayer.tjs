@@ -1,0 +1,1482 @@
+//;# MessageLayer.tjs - メッセージレイヤ
+//;# Copyright (C)2001-2006, W.Dee and contributors  改変?配布は自由です
+/** 
+ * 表示状態と表示レベルについてあるレイヤと相対同期するレイヤ  显示状态和显示高度与某层用相对位置定位的层
+ */
+class RelativeLayer extends KAGLayer
+{
+    var owner;
+    
+    var _visible;
+    property visible {
+        setter(v) {
+            _visible = v;
+            super.visible = owner.visible && _visible;
+        }
+        getter() {
+            return _visible;
+        }
+    }
+
+    var _absolute;
+    property absolute {
+        setter(v) {
+            _absolute = v;
+            super.absolute = owner.absolute + _absolute;
+        }
+        getter() {
+            return _absolute;
+        }
+    }
+
+	/*
+	以这种方式来记忆对齐的方式吧
+	0 1 2
+	7 8 3
+	6 5 4
+	*/
+    // 原点補正処理
+    var _originMode = 0;
+    property originMode {
+        setter(v) {
+            _originMode = v;
+            left = left;
+            top = top;
+        }
+        getter() {
+            return _originMode;
+        }
+    }
+    
+    var _left;
+    property left {
+        setter(v) {
+            _left = v;
+            switch (_originMode) { //左对齐
+            case 0:
+            case 6:
+            case 7:
+                super.left = owner.left + _left;
+                break;//居中
+            case 1:
+            case 5:
+            case 8:
+                super.left = owner.left + _left - width / 2;
+                break;//右对齐
+            case 2:
+            case 3:
+            case 4:
+                super.left = owner.left + _left - width;
+                break;
+            }
+        }
+        getter() {
+            return _left;
+        }
+    }
+
+    var _top;
+    property top {
+        setter(v) {
+            _top = v;
+            switch (_originMode) {
+            case 0://上对齐
+            case 1:
+            case 2:
+                super.top = owner.top + _top;
+                break;//居中
+            case 3:
+            case 7:
+            case 8:
+                super.top = owner.top + _top - height / 2;
+                break;//下对齐
+            case 4:
+            case 5:
+            case 6:
+                super.top = owner.top + _top - height;
+                break;
+            }
+        }
+        getter() {
+            return _top;
+        }
+    }
+
+    function setPos(l, t, w=void, h=void) {
+        left = (int)l;
+        top  = (int)t;
+        width  = (int)w if w !== void;
+        height = (int)h if h !== void;
+    }
+
+	function assignImages(src, copyvisiblestate = false)
+	{
+        super.assignImages(src);
+        if (copyvisiblestate) {
+            var su = super;
+            visible  = src.visible;
+            opacity  = src.opacity;
+            absolute = src.absolute if !src.isPrimary && src.parent.absoluteOrderMode;
+            _originMode = src._originMode;
+            su.type = src.type;
+            setPos(src.left, src.top, src.width, src.height);
+            su.setImagePos(src.imageLeft, src.imageTop);
+        }
+    }
+
+	function loadImages(storage, key)
+	{
+        var ret = super.loadImages(storage, key);
+        setSizeToImageSize();
+        top  = top;
+        left = left;
+	}
+
+	function store() {
+        var dic = super.store();
+        dic.originMode = originMode;
+        return dic;
+    }
+    
+    function restore(dic) {
+        originMode = dic.originMode if dic.originMode !== void;
+        super.restore(dic);
+    }
+    
+    function RelativeLayer(owner) {
+        this.owner = owner;
+        super.KAGLayer(owner.window, owner.parent);
+        setPos(0,0,8,8);
+        absolute = 1;
+        visible = false;
+    }
+}
+
+/*
+	消息层的绘制类
+	支持同时绘制主语言和副语言
+	文本的字体遵循kag的chDefaultFace 和 chUserFace
+	所有的变更字体(setFont,resetFont)都会导致重新绘制文本，谨慎使用
+	
+*/
+class MessageLayer extends DialogLayer
+{							
+
+    function setPos(l, t, w=void, h=void) {
+        left = (int)l;
+        top  = (int)t;
+        width  = (int)w if w !== void;
+        height = (int)h if h !== void;
+    }
+
+    /**
+     * 不透明度変更処理   设置实际的透明度  渐变动画会使用此方法
+     * 関連レイヤもあわせて制御
+     */
+    function setInnerOpacity(v) {
+        if (v !== void) {
+            super.opacity = v;
+        }
+    }
+
+    /**
+     * 表示状態変更処理    设置实际的可见状态
+     * 関連レイヤもあわせて制御
+     */
+    function setInnerVisible(v) {
+        if (v !== void) {
+            super.visible     = v;
+        }
+    }
+
+    /**
+     * 本来指定されている最終的な表示状態?不透明度にもどして
+     * 実行中のフェードを中止する
+     */
+    function fadeDone() {
+        //dm("窓表示処理終了");
+        setInnerOpacity(_opacity);
+        setInnerVisible(_visible);
+        _fadeTimer.enabled = false;
+        if (window.isMain && window.conductor !== void) {
+            window.trigger("msgvisible");
+        }
+    }
+    
+    // 不透明度
+    var _opacity;
+    property opacity {
+        setter(v) {
+            _opacity = v;
+            fadeDone();
+        }
+        getter() {
+            return _opacity;
+        }
+    }
+
+    // 表示状態
+    var _visible;
+    property visible {
+        setter(v) {
+            _visible = v;
+            fadeDone();
+        }
+        getter() {
+            return _visible;
+        }
+    }
+
+    var _fadeTimer;
+    var _fadeStartTime;
+    var _fadeTime;
+    var _startOpacity;
+    var _toOpacity;
+    
+    function fadeHandler() {
+        var now = System.getTickCount() - _fadeStartTime;
+        if (now >= _fadeTime) {
+            fadeDone();
+        } else {
+            setInnerOpacity(_startOpacity + (_toOpacity - _startOpacity) * now / _fadeTime);
+        }
+    }
+
+    /**
+     * visible に応じてフェードも自動調整する
+     */
+    function setVisibleTime(v, time) {
+        if (v != visible) {
+            //dm("窓フェード表示処理:" + v);
+            _visible = v;
+            if (time > 0) {
+                _fadeStartTime = System.getTickCount();
+                _fadeTime      = time;
+                _startOpacity = v ? 0 : _opacity;
+                _toOpacity    = v ? _opacity : 0;
+                setInnerOpacity(_startOpacity);
+                setInnerVisible(true);
+                _fadeTimer.enabled = true;
+            } else {
+                fadeDone();
+            }
+        } 
+    }
+
+    
+    var wwFollowing = "%),:;]}｡｣ﾞﾟ。，、．：；゛゜ヽヾゝ"
+                "ゞ々’”）〕］｝〉》」』】°′″℃￠％‰"; // 行頭禁則文字
+	var wwFollowingWeak="!.?､･ｧｨｩｪｫｬｭｮｯｰ・？！ーぁぃぅぇぉっゃゅょゎァィ"
+                "ゥェォッャュョヮヵヶ"; // 行頭(弱)禁則文字
+    var wwLeading="\\$([{｢‘“（〔［｛〈《「『【￥＄￡"; // 行末禁則文字
+
+	wwFollowing += wwFollowingWeak;
+
+
+	// 以下、/*C*/ の記号のついたものは、assign のときに自動的にコピーされるもの。
+	// /*S*/ の記号のついたものは、store/resto の時に自動的にコピーされるもの。
+	// これらの変数名をいじったり、変数を削除したり、追加する場合はいったんまた
+	// perl スクリプトとしてこのスクリプトを実行する必要があります。
+	// ( 末端の perl スクリプトで処理 )
+	// 以下，带有/*C*/符号的是在assign时自动复制的。
+	// 带有/*S*/符号的是在store/resto时自动复制的。
+	// 您必须先将此脚本作为perl脚本运行，然后才能操作这些变量名称、删除或添加变量。perl脚本在末端
+
+	var layerType = ltAlpha; // レイヤタイプ					层类型
+	/*CS*/var marginL = 8; // 左マージン
+	/*CS*/var marginT = 8; // 上マージン
+	/*CS*/var marginR = 8; // 右マージン
+	/*CS*/var marginB = 8; // 下マージン
+	/*CS*/var marginRCh = 2; // 右端(縦書きの場合は下端)に確保する禁則処理用余白  右端确保禁则文字的留白
+	/*CS*/var shrinkRatio = 0.7; //多种语言时字体的缩小幅度 
+	/*C*/var endPositionX;	//绘制结束后的X坐标
+	/*C*/var endPositionY; // 绘制结束后的Y坐标
+	/*C*/var relinexpos; // 改行すべき最終右(縦書きの場合は下)位置  	换行的位置
+
+	// var highlightLayer; // リンクを強調表示するためのレイヤ
+	/*C*/var selProcessLock = false; // process 後にリンクが操作されるのを防ぐためのフラグ	防止process后进行操作
+
+	/*CS*/var vertical = false; // 縦書きモードの時に true						是否竖写
+
+	/*CS*/var defaultFontSize = 24; // デフォルトのフォント高さ  默认字体大小
+	/*C*/var fontSize; // フォント高さ							字体大小
+	/*CS*/var defaultLineSize = 0; // デフォルトのライン高さ   	默认行高
+	/*C*/var reserveLineSize = 0; // '予約' ライン高さ   		 最大的行高
+	/*C*/var lineSize; // ライン高さ    							行高
+	/*CS*/var defaultRubySize = 10; // デフォルトのルビの高さ
+	/*C*/var rubySize; // ルビ高さ									振假名的大小，即类似注音符号的大小
+	/*CS*/var defaultRubyOffset = -2; // デフォルトのルビのオフセット
+	/*C*/var rubyOffset; // ルビのオフセット
+	/*CS*/var defaultLineSpacing = 6; // デフォルトの行間 		  默认行间距
+	/*C*/var lineSpacing; // 行間								行间距((可看做行的上端留白))
+	/*CS*/var defaultPitch = 0; // デフォルトの字間  			 默认字间距
+	/*C*/var pitch; // 字間  									字间距
+	/*CS*/var defaultShadow = true; // デフォルトで影をつけるか   默认是否字体阴影
+	/*C*/var shadow; // 影をつけるか							是否字体阴影
+	/*CS*/var defaultEdge = false; // デフォルトで縁取りをするか  默认是否镶边
+	/*C*/var edge; // 縁取りをするか							 是否镶边
+	/*CS*/var defaultShadowColor = 0x000000; // デフォルトの影の色 默认阴影颜色
+	/*C*/var shadowColor; // 影の色									阴影颜色
+	/*CS*/var defaultEdgeColor = 0x0080ff; // デフォルトの縁取りの色 默认镶边颜色
+	/*C*/var edgeColor; // 縁取りの色								镶边颜色
+	/*CS*/var defaultBold = true; // デフォルトでボールドで描画するか  默认是否加粗
+	/*C*/var bold; // ボールドで描画するか							是否加粗
+	/*CS*/var defaultItalic = false; //  默认是否斜体
+	/*C*/var italic; // 是否斜体 
+
+	/*CS*/var defaultChColor = 0xffffff; // デフォルトの文字色	  	默认文字颜色
+	/*C*/var chColor; // 文字色										文字颜色
+	/*C*/var antialiased; // アンチエイリアスを掛けるか							是否抗锯齿
+	/*CS*/var edgeExtent = 1; // 袋文字のふとさ									文字描边的宽度
+	/*CS*/var edgeEmphasis = 512; // 袋文字の強調度								文字描边的强度值
+	/*CS*/var shadowOffsetX = 2; // 影のオフセット				阴影偏移量
+	/*CS*/var shadowOffsetY = 2; // 影のオフセット
+	/*CS*/var shadowWidth   = 0; // 影ぼかし度						阴影宽度
+
+	/*CS*/var lineLayerPadding = 4; // 上下左右の余白ドット分（袋文字・影描画用）		上下左右的留白，轮廓文字或阴影绘制用 (可看做行的下端留白)
+
+
+	/*C*/var align=-1; // -1=左/上そろえ  0=中央揃え   1=右/下そろえ			对齐方式，-1位左/上对齐 0居中 1右/下对齐
+
+	var pageBreak; // ページ待ち用グリフのアニメーションレイヤ											换页图层
+	var pageBreakAnime	 = 16;		// 换页点击动画数量  
+	var pageBreakHorizon = true; 	// 换页点击动画是否横向排列
+	/*CS*/var pageBreakGlyph = "pagebreak"; // ページ待ち記号名					换页等待符号
+	/*CS*/var pageBreakGlyphKey = clNone; // ページ待ち記号のカラーキー			换页等待符号颜色
+	/*CS*/var glyphFixedPosition = false; // 記号を固定箇所に表示するか			是否将记号在古代位置标准
+	/*CS*/var glyphFixedLeft = 0; // その位置									记号位置（左端
+	/*CS*/var glyphFixedTop = 0;												//记号位置（顶端
+
+	/*CS*/var glyphFixedSize   = false; // 記号を固定サイズに						(换行/换页)记号是否固定大小
+	/*CS*/var glyphFixedWidth  = 24;     // その位置								记号大小
+	/*CS*/var glyphFixedHeight = 24;
+    
+	/*CS*/var draggable = false; // メッセージレイヤをドラッグ可能か					消息层是否可拖动
+
+	var dragging = false; // ドラッグ中か												是否在拖动中
+	var dragOriginX, dragOriginY; // ドラッグ中、つかんでいる座標						拖动中，抓住的位置的坐标
+			
+	var currentTextInfo = %[];	//当前绘制的剧本文字信息
+  
+    
+	var ml, mt, mw, mh; // 初期レイヤサイズ(config用)									初始大小（config用的）
+
+	var invisibleByUser = false; // ユーザにより一時的に不可視								是否用户一时隐藏
+	var visibleBeforeUserInvisible  = false;												//隐藏前的状态
+	property defaultAntialiased{
+		getter{
+			return window.chDefaultAntialiased;
+		}
+	}
+	property actualChSpeed{
+		getter{ return window.actualChSpeed;}
+	}
+	var mainRender;
+	var subRender;
+    property working{
+		getter{	
+			return subRender.working || mainRender.working;
+		}
+	}
+	function getFontFace(lan){
+		return window.getFontFace(lan);
+	}
+    // 名前描画用レイヤ				绘制名字用的层
+    var nameLayer;
+	var textLayer; // 文字绘制层
+	var quickmenu; // 快捷菜单
+    // 顔描画用レイヤ				绘制脸用的层
+    var faceLayer;
+
+    // タイムアウト処理用		超时处理用
+    var timeoutTimer;
+    var timeoutTime;
+    var timeoutStorage;
+    var timeoutTarget;
+    var timeoutExp;
+    
+    function clearTimeout() {
+        stopTimeout();
+        timeoutTime    = void;
+        timeoutStorage = void;
+        timeoutTarget  = void;
+        timeoutExp     = void;
+    }
+    
+    function timeoutHandler() {		//到时间后会自动跳转指定脚本，这个定时器只触发一次
+        // 実行
+        Scripts.eval(timeoutExp) if timeoutExp != '';
+        if (timeoutStorage != '' || timeoutTarget != '') {
+            window.lockMessageLayerSelProcess(); // 選択をロック
+            window.process(timeoutStorage, timeoutTarget);
+        }
+        clearTimeout();
+    }
+
+    function addTimeout(elm) {
+        timeoutTime    = elm.time;
+        timeoutStorage = elm.storage;
+        timeoutTarget  = elm.target;
+        if (elm.exp !== void) {
+            timeoutExp = createSoundExpression(elm.exp, elm.clickse, elm.clicksebuf);
+        }
+        focusable = true; // フォーカスを受け取れるように
+        setSelProcessLock(false); // 選択ロック解除
+        //comp.setSelProcessLock(false); // 選択ロック解除
+    }
+
+    function stopTimeout() {
+        if (timeoutTimer !== void) {
+            invalidate timeoutTimer;
+            timeoutTimer = void;
+        }
+    }
+    
+    function startTimeout() {
+        if (timeoutTime > 0 && (timeoutStorage !== void || timeoutTarget !== void)) {
+            timeoutTimer = new Timer(timeoutHandler, '');
+            timeoutTimer.capacity = 1;
+            timeoutTimer.interval = timeoutTime;
+            timeoutTimer.enabled  = true;
+        }
+    }
+
+    var clickExp;
+    var clickStorage;
+    var clickTarget;
+
+    function clearClick() {
+        clickStorage = void;
+        clickTarget  = void;
+        clickExp     = void;
+    }
+
+    function addClick(elm) {
+        clickStorage = elm.storage;
+        clickTarget  = elm.target;
+        if (elm.exp !== void) {
+            clickExp = createSoundExpression(elm.exp, elm.clickse, elm.clicksebuf);
+        }
+        focusable = true; // フォーカスを受け取れるように
+        setSelProcessLock(false); // 選択ロック解除
+        //comp.setSelProcessLock(false); // 選択ロック解除
+    }
+
+    function hasClick() {//此层是否存在点击事件
+        return clickExp !== void || clickStorage !== void || clickTarget !== void;
+    }
+    
+    function processClick() {
+        Scripts.eval(clickExp) if clickExp != '';
+        if(clickStorage != '' || clickTarget != '') {
+            window.lockMessageLayerSelProcess(); // 選択をロック
+            if (window.getKeyState(VK_RETURN) || window.getKeyState(VK_SPACE) || window.getKeyState(VK_CONTROL))
+                window.hideMouseCursor();
+            // キーボードによる操作の場合はマウスカーソルを隠す
+            window.process(clickStorage, clickTarget);
+        }
+        clearClick();
+    }
+    function init(){
+		if(!isBlank(nameLayer)){
+			nameLayer.font.face  = getFontFace();
+			nameLayer.font.bold   = bold;
+			nameLayer.font.italic = italic;
+			nameLayer.font.height = defaultFontSize;
+		}
+		bold = defaultBold;
+		italic=defaultItalic;  
+		fontSize = defaultFontSize;
+		antialiased = defaultAntialiased;
+		chColor = defaultChColor;
+		rubySize = defaultRubySize;
+		rubyOffset = defaultRubyOffset;
+		shadow = defaultShadow;
+		edge = defaultEdge;
+		shadowColor = defaultShadowColor;
+		edgeColor = defaultEdgeColor;
+		// 改行位置を計算
+		if(!vertical)
+			relinexpos = imageWidth - marginR - marginRCh * fontSize;
+		else
+			relinexpos = imageHeight - marginB - marginRCh * fontSize;
+		reserveLineSize = defaultLineSize;
+		lineSpacing = defaultLineSpacing;
+		pitch = defaultPitch;
+		resetLineSize();
+		align = -1;
+	}
+    function MessageLayer(owner, parent, name, id, do_config)
+	{
+		super.DialogLayer(...);
+        left = 0;
+        top  = 0;
+
+        _opacity = super.opacity;
+        _visible = super.visible;
+
+		// コンフィギュレーション
+		if(do_config)
+		{
+			(MessageLayer_config incontextof this)();
+			(MessageLayer_config_override incontextof this)()
+				if typeof global.MessageLayer_config_override != "undefined";
+
+			// 初期サイズは mw mh に入っているので
+			setPos(ml, mt);
+			setImageSize(mw, mh);
+			setSize(mw, mh);
+		}
+		else
+		{
+			// config を行わない場合
+			// サイズはデフォルトで決定する
+			setPos(0, 0);
+			setImageSize(parent.width, parent.height);
+			setSize(parent.width, parent.height);
+		}
+
+		// config 用一時変数の消去
+		delete ml; delete mt; delete mw; delete mh;
+
+		// レイヤタイプの設定
+		type = layerType;
+
+		textLayer = new global.KAGLayer(window,this);
+		with (textLayer) {
+			.hitType = htMask;
+			.hitThreshold = 256; // マウスメッセージは全域透過
+			.type = layerType;
+			.name = name + ":text";
+			setSizeToImageSize(); // サイズ同期
+			clearTextLayer();
+			.visible = true;
+			.absolute = 1900; // 低于快捷菜单层
+		}
+		//todo  语言相关的hook
+		mainRender = new TextRender(this,textLayer,SystemLanguage.mainLan);
+		subRender = new TextRender(this,textLayer,SystemLanguage.subLan);
+
+		pageBreak = new ClickGlyphLayer(window, this);
+		pageBreak.name = "page waitting symbol";
+		quickmenu = new QuickMenu(window,this);
+
+        // 領域画像で当たり判定を行う
+        nameLayer = new global.KAGLayer(window,this);					//头像层和名称层
+        nameLayer.type = layerType;
+        nameLayer.name = name + ":name";
+        nameLayer.hitType = htProvince;
+
+        faceLayer = new global.AnimationLayer(window,this);	// AnimationLayer及其子层才具有存储图像的功能
+        faceLayer.type = ltAlpha;
+        faceLayer.name = name + ":face";
+        faceLayer.hitType = htProvince;
+        
+        _fadeTimer = new Timer(fadeHandler, '');				//渐入渐出的定时器
+        _fadeTimer.capacity = 1;
+        _fadeTimer.interval = 10;
+        _fadeTimer.enabled  = false;
+		init();
+    }
+
+    
+	function finalize()
+	{
+        // invalidateLinkObjects(); // リンクに結びつけられたオブジェクトの無効化
+        invalidate nameLayer;
+        invalidate faceLayer;
+        invalidate textLayer;
+        invalidate timeoutTimer if timeoutTimer !== void;
+		invalidate pageBreak;
+        invalidate _fadeTimer;
+        super.finalize();
+	}
+
+
+	function setCompLayer(lay) { 
+		super.setCompLayer(lay);
+		if(!isBlank(lay.quickmenu))
+			lay.quickmenu.setCompLayer(quickmenu);
+	} 
+    function clearLayer(all)
+	{
+		super.clearLayer(); 
+		// レイヤをクリア
+		window.updateBeforeCh = 1;
+		cancelDrag();
+		clearTextLayer();
+
+        if (all) {
+            faceLayer.visible = false;
+            nameLayer.visible = false;
+        }
+    }
+
+	function setSizeToImageSize() {
+		super.setSizeToImageSize();
+		 with (textLayer) {
+			.setImageSize(width, height);
+			.setSizeToImageSize();
+		}
+	}
+
+	function setOptions(elm)
+	{
+		// elm に従ってメッセージレイヤのオプションを設定
+		// このタグが position という名前なのは相当初期の KAG
+		// がそうだったのを引きずってるのね(^^;
+		super.setOptions(elm);
+
+		marginL = +elm.marginl if elm.marginl !== void;
+		marginT = +elm.margint if elm.margint !== void;
+		marginR = +elm.marginr if elm.marginr !== void;
+		marginB = +elm.marginb if elm.marginb !== void;
+		vertical = +elm.vertical if elm.vertical !== void;
+		draggable = +elm.draggable if elm.draggable !== void;
+		visible = +elm.visible if elm.visible !== void;
+      
+        
+        // 名前窓
+        nameLayer.left     = +elm.nameleft   if elm.nameleft   !== void;
+        nameLayer.top      = +elm.nametop    if elm.nametop    !== void;
+        nameLayer.width    = +elm.namewidth  if elm.namewidth  !== void;
+        nameLayer.height   = +elm.nameheight if elm.nameheight !== void;
+        nameLayer.visible   = +elm.namevis if elm.namevis !== void;
+        nameLayer.absolute = +elm.nameabsolute if elm.nameabsolute !== void;
+        
+        // 表情窓
+        faceLayer.left     = +elm.faceleft   if elm.faceleft   !== void;
+        faceLayer.top      = +elm.facetop    if elm.facetop    !== void;
+        faceLayer.width    = +elm.facewidth  if elm.facewidth  !== void;
+        faceLayer.height   = +elm.faceheight if elm.faceheight !== void;
+        faceLayer.visible   = +elm.facevis if elm.facevis !== void;
+        faceLayer.absolute = +elm.faceabsolute if elm.faceabsolute !== void;
+		// 快捷菜单
+		quickmenu.resetPosition();
+       // clear(true);
+    }
+	//清空本图层
+	function clear(all=false)
+	{
+		// メッセージレイヤをクリアする
+		clearLayer(all);
+		init();
+        clearTimeout();
+        clearClick();
+		pageBreak.visible = false;
+    }
+	// テキストレイヤをクリア
+	function clearTextLayer() {
+		with (textLayer) {
+			.face = dfAuto;
+			.fillRect( 0, 0, .imageWidth, .imageHeight, 0);
+		}
+	}
+
+	function setSelProcessLock(b)//防止控件被连点，选择后无法再次点击
+	{
+		super.setSelProcessLock(b);
+		if(!isBlank(quickmenu))quickmenu.setSelProcessLock(b);
+	}
+
+	function resetFont()	
+	{
+		bold = defaultBold;
+		italic=defaultItalic;  
+
+		fontSize = defaultFontSize;
+		antialiased = defaultAntialiased;
+
+		chColor = defaultChColor;
+		rubySize = defaultRubySize;
+		rubyOffset = defaultRubyOffset;
+		shadow = defaultShadow;
+		edge = defaultEdge;
+		shadowColor = defaultShadowColor;
+		edgeColor = defaultEdgeColor;
+
+		// 改行位置を計算
+		if(!vertical)
+			relinexpos = imageWidth - marginR - marginRCh * fontSize;
+		else
+			relinexpos = imageHeight - marginB - marginRCh * fontSize;
+		resetLineSize();
+		redraw();
+        nameLayer.font.face   = getFontFace();
+        // nameLayer.font.angle  = lineLayer.font.angle;
+        nameLayer.font.bold   = bold;
+        nameLayer.font.italic = italic;
+        nameLayer.font.height = defaultFontSize;
+    }
+
+	function setFont(elm)
+	{
+        if(elm.antialiased == 'default')
+			antialiased = defaultAntialiased;
+		else if(elm.antialiased !== void)
+			antialiased = +elm.antialiased;
+
+		if(elm.bold == 'default')
+			bold = defaultBold;
+		else if(elm.bold !== void)
+			bold = +elm.bold;
+
+		if(elm.italic == 'default')
+			italic = defaultItalic;
+		else if(elm.italic !== void)
+			italic = +elm.italic;
+
+		if(elm.size == 'default')
+			fontSize = defaultFontSize;
+		else if(elm.size !== void)
+			fontSize = +elm.size;
+		
+		if(elm.color == 'default')
+			chColor = defaultChColor;
+		else if(elm.color !== void)
+			chColor = +elm.color;
+
+		if(elm.rubysize == 'default')
+			rubySize = defaultRubySize;
+		else if(elm.rubysize !== void)
+			rubySize = +elm.rubysize;
+
+		if(elm.rubyoffset == 'default')
+			rubyOffset = defaultRubyOffset;
+		else if(elm.rubyoffset !== void)
+			rubyOffset = +elm.rubyoffset;
+
+		if(elm.shadow == 'default')
+			shadow = defaultShadow;
+		else if(elm.shadow !== void)
+			shadow = +elm.shadow;
+
+		if(elm.shadowcolor == 'default')
+			shadowColor = defaultShadowColor;
+		else if(elm.shadowcolor !== void)
+			shadowColor = +elm.shadowcolor;
+
+		if(elm.edge == 'default')
+			edge = defaultEdge;
+		else if(elm.edge !== void)
+			edge = +elm.edge;
+
+		if(elm.edgecolor == 'default')
+			edgeColor = defaultEdgeColor;
+		else if(elm.edgecolor !== void)
+			edgeColor = +elm.edgecolor;
+
+		if(!vertical)
+			relinexpos = int(imageWidth-marginR-marginRCh*fontSize);
+		else
+			relinexpos = int(imageHeight-marginB-marginRCh*fontSize);
+		resetLineSize();
+        nameLayer.font.face   = getFontFace();
+        // nameLayer.font.angle  = angle;
+        nameLayer.font.bold   = bold;
+        nameLayer.font.italic = italic;
+        nameLayer.font.height = defaultFontSize;
+		redraw();
+    }
+
+	function setDefaultFont(elm)
+	{
+		defaultBold = +elm.bold if elm.bold !== void;
+		defaultItalic = +elm.italic if elm.italic !== void;
+		defaultFontSize = +elm.size if elm.size !== void;
+		defaultChColor = +elm.color if elm.color !== void;
+		defaultRubySize = +elm.rubysize if elm.rubysize !== void;
+		defaultRubyOffset = +elm.rubyoffset if elm.rubyoffset !== void;
+		defaultShadow = +elm.shadow if elm.shadow !== void;
+		defaultShadowColor = +elm.shadowcolor if elm.shadowcolor !== void;
+		defaultEdge = +elm.edge if elm.edge !== void;
+		defaultEdgeColor = +elm.edgecolor if elm.edgecolor !== void;
+	}
+
+	function resetStyle()
+	{
+		// スタイルのリセット
+		reserveLineSize = defaultLineSize;
+		lineSpacing = defaultLineSpacing;
+		pitch = defaultPitch;
+		resetLineSize();
+		align = -1;
+	}
+
+	function setStyle(elm)
+	{
+		// スタイルの設定
+		if(elm.linespacing == 'default')
+			lineSpacing = defaultLineSpacing;
+		else if(elm.linespacing !== void)
+			lineSpacing = +elm.linespacing;
+
+		if(elm.pitch == 'default')
+			pitch = defaultPitch;
+		else if(elm.pitch !== void)
+			pitch = +elm.pitch;
+
+		if(elm.linesize == 'default')
+		{
+			reserveLineSize = defaultLineSize;
+		}
+		else if(elm.linesize !== void)
+		{
+			reserveLineSize = +elm.linesize;
+			resetLineSize();
+		}
+		//	改变对齐方式前会先固定行的内容
+		if(elm.align == 'default')
+		{
+			align = -1;
+
+		}
+		else if(elm.align !== void)	
+		{
+			if(elm.align == 'left' || elm.align == 'top')
+				align = -1;
+			else if(elm.align == 'center')
+				align = 0;
+			else if(elm.align == 'right' || elm.align == 'bottom')
+				align = 1;
+		}
+		
+	}
+
+	function setDefaultStyle(elm)
+	{
+		// デフォルトのスタイルの設定
+		defaultLineSpacing = +elm.linespacing if elm.linespacing !== void;
+		defaultPitch = +elm.pitch if elm.pitch !== void;
+		defaultLineSize = +elm.linesize if elm.linesize !== void;
+	}
+
+
+	function resetLineSize()
+	{
+		// ラインサイズのリセット
+		lineSize = reserveLineSize > fontSize ? reserveLineSize : fontSize;
+	}
+	/** 
+	* @description: 渲染文字，可同时渲染多语言
+	* @param elm.num	剧本文件行数
+	* @param elm.storage 剧本文件名
+	* @return void
+	*/	
+	function processText(elm){
+		clearTextLayer(); //每次绘制清除之前的
+		if(isBlank(elm) || isBlank(elm.num))return;
+		currentTextInfo = elm;
+		var textInfo = SystemLanguage.getScenarioText(SystemLanguage.mainLan,elm.storage,elm.num);
+		var doubleLan = !isBlank(SystemLanguage.subLan) && SystemLanguage.subLan != SystemLanguage.mainLan;
+		if(!isBlank(textInfo.name))
+			processName(SystemLanguage.getSystemText(,"name."+textInfo.name,""));
+		else processName();
+		var x,y;
+		if(vertical)
+		{
+			x = imageWidth - marginR;
+			y = marginT;
+		}
+		else
+		{
+			x = marginL;
+			y = marginT;
+		}
+		mainRender.shrinkRatio = doubleLan? shrinkRatio:1.0; 
+		var endPosition = mainRender.init(%[x:x,y:y],textLayer,textInfo.text);
+		x = endPositionX = endPosition.x , y = endPositionY = endPosition.y;
+		mainRender.startRender();
+		//副语言处理
+		if(!doubleLan) return;
+
+		if(vertical)
+		{
+			y = marginT;
+			x -= lineSize + lineSpacing;
+		}
+		else
+		{
+			y += lineSize + lineSpacing;
+			x = marginL;
+		}
+		textInfo = SystemLanguage.getScenarioText(SystemLanguage.subLan,elm.storage,elm.num);
+		subRender.shrinkRatio = shrinkRatio; 
+		endPosition = subRender.init(%[x:x,y:y],textLayer,textInfo.text);
+		endPositionX = endPosition.x,endPositionY = endPosition.y;
+		subRender.startRender();
+	}
+
+	/** 
+	* @description: 重新绘制，会瞬间完成
+	* @return void
+	*/
+	function redraw(){
+		super.redraw();
+		if(isBlank(currentTextInfo) || isBlank(currentTextInfo,"storage"))return;
+		mainRender.stopRender();
+		subRender.stopRender();
+		clearTextLayer();
+		processText(currentTextInfo);
+		mainRender.stopRender();
+		subRender.stopRender();
+		//仅仅改变图标位置，显示不显示不由这里控制
+		 if(!glyphFixedPosition)
+		{
+			if(vertical)
+				pageBreak.setPos(endPositionX - fontSize,endPositionY);
+			else 
+				pageBreak.setPos(endPositionX,endPositionY);
+		}
+	}
+
+	/** 
+	* @description: 结束绘制
+	* @return 	void
+	*/
+	function complete(){
+		mainRender.working = false;
+		subRender.working = false if(subRender.working);
+	}
+	function onRenderComplete(){
+		if(!working && window.current ==this){ // 里消息层就不触发了
+			window.mainConductor.trigger("endText");
+		}
+	}
+
+    
+    /**
+     * 名前の描画			绘制名字
+     */
+    function processName(text="") {  
+        SystemLanguage.getSystemText(,text,text);
+		if (!isBlank(text)) {
+				nameLayer.fillRect(0,0,nameLayer.width,nameLayer.height,0);
+			if(edge)
+				nameLayer.drawText(0, 0, text, chColor, 255, antialiased, 512, edgeColor, 1, 0, 0); // 文字
+			else if(shadow)
+				nameLayer.drawText(0, 0, text, chColor, 255, antialiased, 255, shadowColor, 0, 2, 2); // 文字
+			else
+				nameLayer.drawText(0, 0, text, chColor, 255, antialiased); // 文字
+			nameLayer.visible = true;
+		} else {
+			nameLayer.visible = false;
+		}
+	}
+    
+
+
+    //	目前觉得该方法没有必要
+	/*deprecated*/function highlightLink(n, b = false) //高亮文字 n为link的编号
+	{
+		// n 番目のリンクを
+		// b : true  : ハイライトする
+		// b : false : ハイライトを消す
+		/*if(selProcessLock) return;
+		if(b)
+		{
+			// ハイライトする
+			if(!vertical)
+			{
+
+				highlightLayer.setPos(0, min);
+				highlightLayer.setImageSize(imageWidth, max - min);
+				highlightLayer.setSizeToImageSize();
+			}
+			else
+			{
+				highlightLayer.setPos(min, 0);
+				highlightLayer.setImageSize(max - min, imageHeight);
+				highlightLayer.setSizeToImageSize();
+			}
+			//清空高亮层
+			highlightLayer.fillRect(0, 0,
+				highlightLayer.imageWidth,
+				highlightLayer.imageHeight, 0);
+			highlightLayer.face = dfProvince;
+			highlightLayer.fillRect(0, 0,
+				highlightLayer.imageWidth,
+				highlightLayer.imageHeight, 0);
+			highlightLayer.face = dfAuto;
+
+			var i;
+			for(i = 0; i < linkn.lineCount; i++)//绘制高亮
+			{
+				highlightLayer.colorRect(
+					x - highlightLayer.left,
+					y - highlightLayer.top,
+					linkn.w[i], linkn.h[i], linkn.color, linkn.opacity);
+			}
+
+			highlightLayer.visible = true;
+
+			cursor = window.cursorPointed;
+		}
+		else
+		{
+			highlightLayer.visible = false;
+			cursor = crDefault;
+		}*/
+	}
+
+	function onUiloaded(){
+		//textLayer.bringToFront();
+	}
+	function onKeyDown(key, shift) //键盘按键事件，控制焦点
+	{
+		// キーが押された
+		if(window.preProcessKeys(key, shift)) return;//hook到了 跳过
+
+		if(!focusable || (!numLinks && !hasClick())) { return super.onKeyDown(...); }	//无法获得焦点就跳过
+
+
+		if(!selProcessLock && ((key == VK_UP && !(shift & ssShift)) ||
+			(key == VK_TAB && (shift & ssShift))))		// 能切换焦点则切换
+		{
+			if(keyLink == -1 || keyLink == 0)	
+			{
+				var l = focusPrev();
+				if(l !== null) return;
+				keyLink = numLinks - 1;
+			}
+			else
+			{
+				keyLink--;
+			}
+			var obj = setFocusToLink(keyLink);
+			if(obj !== void) obj.focus();
+		}
+		else if(!selProcessLock && (key == VK_DOWN  || (key == VK_TAB && !(shift & ssShift))))
+		{
+			if(keyLink == -1 || keyLink == numLinks -1)
+			{
+				var l = focusNext();
+				if(l !== null) return;
+				keyLink = 0;
+			}
+			else
+			{
+				keyLink ++;
+			}
+			var obj = setFocusToLink(keyLink);
+			if(obj !== void) obj.focus();
+		}
+		else if(key == VK_SPACE || key == VK_RETURN)	// 空格和enter 有点击事件则点击，或尝试前进
+		{
+            if(selProcessLock || keyLink == -1) {
+                if (hasClick()) {
+                    processClick();
+                } else {
+                    window.checkProceedingKey(key, shift);
+                }
+            }
+		}
+		else	// 此时有焦点所以window的keydown事件不会处理
+		{
+			window.processKeys(key, shift); // window に処理をまかせる
+		}
+	}
+
+
+	function internalHitTest(x, y)//内部的鼠标点击判定
+	{
+        // onHitTest イベントハンドラ(内部関数)
+		if(isDragPos(x, y))
+		{
+			cursor = window.cursorDraggable;
+			showParentHint = true;
+			return true; // 不透過
+		}
+		return hasClick(); // クリック処理がなければ透過
+	}
+
+	function onHitTest(x, y, b)
+	{
+		// onHitTest イベントハンドラ
+		var b = internalHitTest(x - imageLeft, y - imageTop);
+		return super.onHitTest(x, y, b);
+	}
+
+	function internalOnMouseDown(x, y, button)
+	{
+        // onMouseDown イベントハンドラ(内部関数)
+		if(button == mbLeft && !selProcessLock)
+		{
+			if (hasClick()) {
+				processClick();
+				return;
+			}
+		}
+
+		if(isDragPos(x, y))
+		{
+			// ドラッグ可能位置の場合
+			if(window.inStable)
+			{
+				dragOriginX = x;
+				dragOriginY = y;
+				dragging = true; // ドラッグの開始
+			}
+		}
+	}
+
+	function onMouseDown(x, y, button)
+	{	
+		internalOnMouseDown(x - imageLeft, y - imageTop, button);
+
+		super.onMouseDown(...);
+	}
+
+	function isDragPos(x, y)//此坐标位置是否可以拖动
+	{
+		// x y の座標が ドラッグでつかむことのできる座標かどうか
+		if(!draggable) return false;
+		if(x >= marginL && y >= marginT && x < imageWidth - marginR && y < imageHeight - marginB)
+			return false;
+		if(x<0 || y<0 || x>=imageWidth || y>=imageHeight) return false;
+		return getMaskPixel(x, y) >= 64;
+	}
+	function onMouseUp(x, y, button)
+	{
+		dragging = false;
+		super.onMouseUp(...);
+	}
+
+	function cancelDrag()
+	{
+		// ドラッグのキャンセル
+		dragging = false;
+	}
+	
+	function onMouseMove(x, y)
+	{
+        // onMouseMove イベントハンドラ
+		super.onMouseMove(...);
+		if(dragging)
+		{
+			// ドラッグ中
+			var px = parent.cursorX;
+			var py = parent.cursorY;
+			if(px < 0) px = 0;
+			if(py < 0) py = 0;
+			if(px >= parent.width) px = parent.width -1;
+			if(py >= parent.height) py = parent.height -1;
+			var l = px - dragOriginX;
+			var t = py - dragOriginY;
+			setPos(l, t);
+			return;
+		}
+
+	}
+
+	function onMouseLeave()
+	{
+		super.onMouseLeave(...);
+	}
+
+	//---------------------------------------------------------------------------------------
+
+	function showPageBreakGlyph()
+	{
+		pageBreak.loadImages(pageBreakGlyph, pageBreakGlyphKey,pageBreakAnime,pageBreakHorizon); // 画像を読み込む	读入画像 
+		pageBreak.bringToFront(); // 最前面に				放到最前
+		
+        if(glyphFixedPosition)
+		{
+			pageBreak.setPos(glyphFixedLeft, glyphFixedTop);
+		}
+		else
+		{	if(vertical)
+				pageBreak.setPos(endPositionX - fontSize,endPositionY);
+			else 
+				pageBreak.setPos(endPositionX,endPositionY);
+			/*if(!vertical)
+				 glyphobj.setPos(endPositionX,endPositionY);
+			else glyphobj.setPos(endPositionX,endPositionY + glyphobj.height);*/
+		}
+        pageBreak.visible = true;
+	}
+	function hidePageBreakGlyph(){
+		pageBreak.visible = false;
+	}
+	function setGlyph(elm)//设置换行换页的符号
+	{
+		if(elm.page !== void)
+		{
+			pageBreakGlyph = elm.page;
+			pageBreakGlyphKey = elm.pagekey;
+			pageBreakAnime = elm.anime; 
+			pageBreakHorizon = elm.horizon;
+		}
+		glyphFixedPosition = +elm.fix if elm.fix !== void;
+		glyphFixedLeft = +elm.left if elm.left !== void;
+		glyphFixedTop = +elm.top if elm.top !== void;
+	}
+
+	function internalAssign(src)
+	{
+        // レイヤの情報をコピー
+		// ( コピーする情報が膨大なのでちょっと実行時間がかかる )
+
+		// textLayerがあればコピー
+		
+		textLayer.assignImages(src.textLayer);
+	
+		// その他の情報のコピー
+		// [start_assign_vars] と [end_assign_vars] の間は
+		// perl によって自動生成されるので、このマークを消したり、
+		// 二つのマークの間を編集したりしないこと。
+		// [start_assign_vars]
+
+		marginL = src.marginL;
+		marginT = src.marginT;
+		marginR = src.marginR;
+		marginB = src.marginB;
+		marginRCh = src.marginRCh;
+		relinexpos = src.relinexpos;
+		endPositionX = src.endPositionX;
+		endPositionY = src.endPositionY;
+		
+		defaultFontSize = src.defaultFontSize;
+		fontSize = src.fontSize;
+		defaultLineSize = src.defaultLineSize;
+		reserveLineSize = src.reserveLineSize;
+		lineSize = src.lineSize;
+		defaultRubySize = src.defaultRubySize;
+		rubySize = src.rubySize;
+		defaultRubyOffset = src.defaultRubyOffset;
+		rubyOffset = src.rubyOffset;
+		defaultLineSpacing = src.defaultLineSpacing;
+		lineSpacing = src.lineSpacing;
+		defaultPitch = src.defaultPitch;
+		pitch = src.pitch;
+		defaultShadow = src.defaultShadow;
+		shadow = src.shadow;
+		defaultEdge = src.defaultEdge;
+		edge = src.edge;
+		defaultShadowColor = src.defaultShadowColor;
+		shadowColor = src.shadowColor;
+		defaultEdgeColor = src.defaultEdgeColor;
+		edgeColor = src.edgeColor;
+		defaultBold = src.defaultBold;
+		bold = src.bold;
+		italic = src.italic;
+		defaultChColor = src.defaultChColor;
+		chColor = src.chColor;
+		antialiased = src.antialiased;
+		vertical = src.vertical;
+		edgeExtent = src.edgeExtent;
+		edgeEmphasis = src.edgeEmphasis;
+		shadowOffsetX = src.shadowOffsetX;
+		shadowOffsetY = src.shadowOffsetY;
+		shadowWidth   = src.shadowWidth;
+		lineLayerPadding = src.lineLayerPadding;
+		align = src.align;
+		pageBreakGlyph = src.pageBreakGlyph;
+		pageBreakGlyphKey = src.pageBreakGlyphKey;
+		pageBreakAnime= src.pageBreakAnime;
+		pageBreakHorizon = src.pageBreakHorizon;
+		glyphFixedPosition = src.glyphFixedPosition;
+		glyphFixedLeft = src.glyphFixedLeft;
+		glyphFixedTop = src.glyphFixedTop;
+		draggable = src.draggable;
+
+		// [end_assign_vars]
+
+        // 名前レイヤ
+        nameLayer.assignImages(src.nameLayer, true);
+
+        // 表情レイヤ
+        faceLayer.assignImages(src.faceLayer, true);
+
+        timeoutTime    = src.timeoutTime;
+        timeoutStorage = src.timeoutStorage;
+        timeoutTarget  = src.timeoutTarget;
+        timeoutExp     = src.timeoutExp;
+
+        clickStorage = src.clickStorage;
+        clickTarget  = src.clickTarget;
+        clickExp     = src.clickExp;
+        
+    }
+
+	function assign(src)
+	{
+		super.assign(src,true);
+		internalAssign(src);
+	}
+
+	function store()
+	{
+		// 現在の状態を辞書配列に記録し、その辞書配列を返す
+		// [start_store_vars] と [end_store_vars] の間は
+		// (略)
+		var dic = super.store();
+		// [start_store_vars]
+		dic.marginL = marginL;
+		dic.marginT = marginT;
+		dic.marginR = marginR;
+		dic.marginB = marginB;
+		dic.marginRCh = marginRCh;
+		dic.defaultFontSize = defaultFontSize;
+		dic.defaultLineSize = defaultLineSize;
+		dic.defaultRubySize = defaultRubySize;
+		dic.defaultRubyOffset = defaultRubyOffset;
+		dic.defaultLineSpacing = defaultLineSpacing;
+		dic.defaultPitch = defaultPitch;
+		dic.defaultShadow = defaultShadow;
+		dic.defaultEdge = defaultEdge;
+		dic.defaultShadowColor = defaultShadowColor;
+		dic.defaultEdgeColor = defaultEdgeColor;
+		dic.defaultBold = defaultBold;
+		dic.defaultItalic =defaultItalic;
+		dic.defaultChColor = defaultChColor;
+		dic.vertical = vertical;
+		dic.edgeExtent = edgeExtent;
+		dic.edgeEmphasis = edgeEmphasis;
+		dic.shadowOffsetX = shadowOffsetX;
+		dic.shadowOffsetY = shadowOffsetY;
+		dic.shadowWidth   = shadowWidth;
+		dic.pageBreakGlyph = pageBreakGlyph;
+		dic.pageBreakGlyphKey = pageBreakGlyphKey;
+		dic.pageBreakAnime= pageBreakAnime;
+		dic.pageBreakHorizon = pageBreakHorizon;
+		dic.glyphFixedPosition = glyphFixedPosition;
+		dic.glyphFixedLeft = glyphFixedLeft;
+		dic.glyphFixedTop = glyphFixedTop;
+        dic.draggable = draggable;
+
+		dic.relinexpos = relinexpos;
+		dic.fontSize = fontSize;
+		dic.reserveLineSize = reserveLineSize;
+		dic.rubySize = rubySize;
+		dic.rubyOffset = rubyOffset;
+		dic.lineSpacing = lineSpacing;
+		dic.pitch = pitch;
+		dic.shadow = shadow;
+		dic.edge = edge;
+		dic.shadowColor = shadowColor;
+		dic.edgeColor = edgeColor;
+		dic.bold = bold;
+		dic.italic = italic;
+		dic.chColor = chColor;
+		dic.align = align;
+
+        dic.faceLayer = faceLayer.store();
+        dic.nameLayer = nameLayer.store();
+        // [end_store_vars]
+		return dic;
+	}
+
+	function restore(dic)
+	{
+		
+		// 状態を dic から読み出す
+		// [start_restore_vars] と [end_restore_vars] の間は
+		// (略)
+		// [start_restore_vars]
+		marginL = dic.marginL if dic.marginL !== void;
+		marginT = dic.marginT if dic.marginT !== void;
+		marginR = dic.marginR if dic.marginR !== void;
+		marginB = dic.marginB if dic.marginB !== void;
+		marginRCh = dic.marginRCh if dic.marginRCh !== void;
+		defaultFontSize = dic.defaultFontSize if dic.defaultFontSize !== void;
+		defaultLineSize = dic.defaultLineSize if dic.defaultLineSize !== void;
+		defaultRubySize = dic.defaultRubySize if dic.defaultRubySize !== void;
+		defaultRubyOffset = dic.defaultRubyOffset if dic.defaultRubyOffset !== void;
+		defaultLineSpacing = dic.defaultLineSpacing if dic.defaultLineSpacing !== void;
+		defaultPitch = dic.defaultPitch if dic.defaultPitch !== void;
+		defaultShadow = dic.defaultShadow if dic.defaultShadow !== void;
+		defaultEdge = dic.defaultEdge if dic.defaultEdge !== void;
+		defaultShadowColor = dic.defaultShadowColor if dic.defaultShadowColor !== void;
+		defaultEdgeColor = dic.defaultEdgeColor if dic.defaultEdgeColor !== void;
+		defaultBold = dic.defaultBold if dic.defaultBold !== void;
+		defaultItalic = dic.defaultItalic if dic.defaultItalic !== void;
+		defaultChColor = dic.defaultChColor if dic.defaultChColor !== void;
+		vertical = dic.vertical if dic.vertical !== void;
+		edgeExtent = dic.edgeExtent if dic.edgeExtent !== void;
+		edgeEmphasis = dic.edgeEmphasis if dic.edgeEmphasis !== void;
+		shadowOffsetX = dic.shadowOffsetX if dic.shadowOffsetX !== void;
+		shadowOffsetY = dic.shadowOffsetY if dic.shadowOffsetY !== void;
+		shadowWidth   = dic.shadowWidth   if dic.shadowWidth   !== void;
+		pageBreakGlyph = dic.pageBreakGlyph if dic.pageBreakGlyph !== void;
+		pageBreakGlyphKey = dic.pageBreakGlyphKey if dic.pageBreakGlyphKey !== void;
+		pageBreakAnime = dic.pageBreakAnime if dic.pageBreakAnime !== void;
+		pageBreakHorizon = dic.pageBreakHorizon if dic.pageBreakHorizon !== void;
+		
+		relinexpos = dic.relinexpos if dic.relinexpos !== void;
+		fontSize = dic.fontSize if dic.fontSize !== void;
+		reserveLineSize = dic.reserveLineSize if dic.reserveLineSize !== void;
+		rubySize = dic.rubySize if dic.rubySize !== void;
+		rubyOffset = dic.rubyOffset if dic.rubyOffset !== void;
+		lineSpacing = dic.lineSpacing if dic.lineSpacing !== void;
+		pitch = dic.pitch if dic.pitch !== void;
+		shadow = dic.shadow if dic.shadow !== void;
+		edge = dic.edge if dic.edge !== void;
+		shadowColor = dic.shadowColor if dic.shadowColor !== void;
+		edgeColor = dic.edgeColor if dic.edgeColor !== void;
+		bold = dic.bold if dic.bold !== void;
+		italic = dic.italic if dic.italic !== void;
+		chColor = dic.chColor if dic.chColor !== void;
+		align = dic.align if dic.align !== void;
+
+		glyphFixedPosition = dic.glyphFixedPosition if dic.glyphFixedPosition !== void;
+		glyphFixedLeft = dic.glyphFixedLeft if dic.glyphFixedLeft !== void;
+		glyphFixedTop = dic.glyphFixedTop if dic.glyphFixedTop !== void;
+		draggable = dic.draggable if dic.draggable !== void;
+        faceLayer.restore(dic.faceLayer) if dic.faceLayer !== void;
+        nameLayer.restore(dic.nameLayer) if dic.nameLayer !== void;
+        // [end_restore_vars]
+		super.restore(dic);
+	}
+
+	function atEndOfTransition(src, withchildren, exchange)
+	{
+		global.AnimationLayer.atEndOfTransition(...);
+		if(src == null) return;
+		assign(src, false);
+		exchangeInfo();
+		window.swapMessageLayer(id);
+	}
+
+
+	/*function exchangeInfo()
+	{
+		// comp と情報を取り替える				和里层的信息交换，只会交换名称信息
+		// すでに 画像の内容、ツリー構造は取り変わっているので
+		// 名前などを取り替える
+		// また、ウィンドウの管理情報も更新するようにする
+		var src = comp;
+		var tmp = src.name;
+		src.name = name;
+		name = tmp;
+
+        tmp = src.nameLayer.name;
+        src.nameLayer.name = nameLayer.name;
+        nameLayer.name = tmp;
+
+        tmp = src.faceLayer.name;
+        src.faceLayer.name = faceLayer.name;
+        faceLayer.name = tmp;
+    }*/
+
+	function setHiddenStateByUser(b)
+	{
+		// ユーザが右クリックなどでメッセージレイヤを一時的に隠すときに
+		// 呼ばれる
+		if(b)
+		{
+			visibleBeforeUserInvisible = visible;
+			invisibleByUser = true; // ユーザにより一時的に不可視
+			visible = false;
+		}
+		else
+		{
+			invisibleByUser = false; // 可視
+			visible = visibleBeforeUserInvisible;
+		}
+	}
+}
+
+
+

@@ -1,0 +1,991 @@
+// Conductor.tjs - KAG シナリオ進行処理
+// Copyright (C)2001-2006, W.Dee and contributors  改変?配布は自由です
+
+
+class ConductorException extends Exception
+{
+	// ConductorException - Conductor がタグハンドラを処理中に発生した例外を   Conductor处理时发生异常抛出的类
+	// 投げる時に使われる例外クラス
+	function ConductorException() { super.Exception(...); }
+	function finalize() { super.finalize(...); }
+};
+
+
+// global.BaseConductorExtendClass = KAGParser if (typeof global.BaseConductorExtendClass == "undefined");
+class BaseConductor extends KAGParser
+{
+	// BaseConductor - シナリオ進行処理のベースクラス
+	var timer;
+	var oneshot;  
+	var _interrupted = false; // 中断中か   是否中断
+	var timerEnabled = false; // タイマが起動中か   定时器是否启动中
+	var pendings; // 後回しにされたタグ    被推后的标签
+	var fasttags; // 最優先実行タグ
+	var nexttags; // 割り込みタグ getNextTag() に割り込みさせるタグ
+	var inProcessing = false; // timerCallback を処理中かどうか  timerCallback 是否处于处理中
+	var reentered = false; // timerCallback 中に 再入したか  是否timerCallback中又再次进入了方法
+	var nextTimerTick = 0; // 次にタイマーが発動されるはずの tick    下次调用定时器的时间戳
+	
+	var parseLine;    // パース中の行番号
+	var parseLineStr; // パース中の行情報
+
+	function BaseConductor()
+	{
+		// コンストラクタ
+		super.KAGParser(...);
+		multiLineTagEnabled = true; //永远允许多行标记
+		timer = new Timer(timerCallback, '');//如果在Timer的第二参数中指定空字符串，则直接调用在第一参数中指定的函数
+			// Timerの第二引数に空文字列を指定すると
+			// 第１引数に指定した関数を直接呼び出すようになる
+		oneshot = new AsyncTrigger(timerCallback, '');
+			// これも同様
+		oneshot.cached = true; // イベントのキャッシュを有効に   启用事件缓存
+
+		pendings = [];
+		fasttags = [];
+		nexttags = [];
+	}
+
+	function finalize()
+	{
+		// finalize()
+		invalidate timer;
+		invalidate oneshot;
+		super.finalize(...);
+	}
+
+	function clearInfo() {
+		pendings.clear();
+		fasttags.clear();
+		nexttags.clear();
+	}
+
+	function clear()
+	{
+		clearInfo();
+		super.clear();
+		parseLine = 0;
+		parseLineStr = "";
+	}
+
+	function checkPending() { return false; }	// 拦截取出指令之前
+	function checkNextTag() { return false; }	// 拦截取出指令之后
+	// 子类覆盖此方法作,在取出指令后 执行指令执行前指令，可以跳过或延迟指令
+	function checkNextParseTag(obj, tick) { return false; }
+
+	
+	/**
+	 * 取指令方法
+	 */
+	function getNextParseTag() {
+		while(true) {
+			if (fasttags.count > 0) {
+				return fasttags.shift();
+			}
+			if (pendings.count > 0) {
+				return pendings.shift();
+			}
+			if (checkPending()) {		//检查是否可放入 指令等待队列
+				continue;
+			}
+			var ret;
+			if (nexttags.count > 0) {
+				ret = nexttags.shift();
+			} else {
+				ret = getNextTag();
+				// タグ展開中につまれてしまったら保留	标签展开中被卡住的话保留
+				// label 処理などがつまれる可能性がある		可能被label处理之类的卡住
+				if (ret !== void) {
+					if (pendings.count > 0 || nexttags.count > 0) {	//如果出现跳过了指令队列 和下条指令队列的情况则放入下条指令队列重新取指令
+						nexttags.push(ret);
+						continue;
+					}
+				}
+			}
+			if (checkNextTag(ret)) {
+				continue;
+			}
+		
+			return ret;
+		}
+	}
+	
+
+	function timerCallback()
+	{
+		// 次の要素を得る  获取下次进入此方法的时间戳
+		var tick = System.getTickCount();
+		nextTimerTick = timer.interval + tick;
+		var obj;
+		try
+		{
+			if(inProcessing)
+			{
+				// 再入  重入
+				reentered = true;
+				timer.interval = 0;
+				return;
+			}
+			inProcessing = true;
+
+			var obj;
+			while ((obj = getNextParseTag()) !== void)
+			{
+				// 行情報更新
+				parseLine    = obj.runLine if obj.runLine !== void;
+				parseLineStr = obj.runLineStr if obj.runLineStr !== void;
+
+				if (checkNextParseTag(obj, tick)) {
+					continue;
+				}
+
+				// onTag を呼ぶ
+				var step = onTag(obj);
+				if(step === void)
+					throw new Exception("onTag returned void (" + obj.tagname + ")"
+						"( maybe the tag handler has forgot to return value )");
+				step = int step; // step を数値に
+				if(step == 0)
+				{
+					// ウェイトを掛けずに次へ    不等待而继续下一条指令
+					timer.interval = 0;
+					continue;
+				}
+				else
+				{
+					if (waitAndBreak(tick, step, obj)) return;
+				}
+			}
+
+			// シナリオ終端
+			timer.enabled = false;
+			oneshot.cancel();
+			timerEnabled =false;
+			onStop(true);
+			inProcessing = false;
+			reentered = false;
+		}
+		catch(e)
+		{
+            //			Debug.logAsError();
+			timer.enabled = false;
+			oneshot.cancel();
+			timerEnabled =false;
+			onStop();
+			inProcessing = false;
+
+			if (onError(e)) {
+				return;
+			}
+
+         var msg = "encounter the fatal error.\n"
+				"file : " + curStorage + "   line : " + (parseLine+1) + "\n"
+				"tag : " + (obj === void ? "unknown" : obj.tagname)
+				+ " ( ← it's common that show tags before or after the error tag )\n"
+				+ e.message;
+			if((typeof e.trace) != "undefined") 
+				dm("trace : " + e.trace);
+			throw new ConductorException(msg);
+			//			System.inform(msg, "错误");
+            
+		}
+	}
+	
+	function waitAndBreak(tick, step, obj)
+	{
+		switch(step)
+		{
+		case -5: // いったんイベントを処理(現在のタグは後回し)
+			pendings.insert(0, obj);
+			// not break;
+		case -4: // いったんイベントを処理
+			oneshot.mode = atmAtIdle;
+			oneshot.trigger(); // トリガ
+			timer.interval = 0; // タイマは停止
+			break;
+		case -3: // ブレーク(現在のタグは後回し)
+			pendings.insert(0, obj);
+			// not break;
+		case -2: // ブレーク
+			timer.interval = 0; // タイマは停止
+			break;
+		case -1: // シナリオ終了
+			timer.interval = 0; 
+			timer.enabled = false;
+			oneshot.cancel();
+			timerEnabled = false;
+			onStop();
+			break;
+		default:
+			if (step <= 0) return false;
+			else if ( timer.interval != step)
+			{
+				timer.interval = step;
+				nextTimerTick  = step + tick;
+			}
+			break;
+		}
+		inProcessing = false;
+		reentered = false;
+		return true;
+	}
+	function onTag()//处理标签的方法
+	{
+		// オーバーライドすること    请重写此方法
+		return -1;
+	}
+
+	function onStop()
+	{
+		// (シナリオの)停止時に呼ばれる。  剧本停止时呼叫
+		// stop() から呼ばれるわけではない。  并非是被stop()方法调用
+		// オーバーライドすること。		请重写此方法
+	}
+
+	function startProcess(immediate = false)
+	{
+		// シナリオ進行開始  		开始处理剧本
+		// immediate = false の場合は非同期で実行を開始するので、   immediate = false时，将进行异步处理
+		// このメソッド内でタグハンドラが呼ばれることはない		此方法内不会调用标签处理器
+		// 次のイベント配信のタイミングで最初のタグハンドラが呼ばれる。	下次事件分发时初次调用处理
+		// immediate = true の場合は、このメソッド内で初回のタグハンドラが   immediate = true时，将进行初次的标签处理
+		// 処理されるため、呼び出し側はこのメソッドの実行が終わったら			调用此方法执行结束后，应该尽快把控制权归还给吉里吉里
+		// すぐに吉里吉里に制御を戻す(すべての関数から抜ける)ようにするべき。
+		resetInterrupt();
+		timer.interval = 0; // 初期インターバル
+		timerEnabled = true;
+		if(!_interrupted)
+		{
+			timer.enabled = true; // タイマー開始
+			if(immediate)
+			{
+				timerCallback();
+			}
+			else
+			{
+				oneshot.mode = atmExclusive;
+					// イベントが配信されるまで他の非同期イベントをブロック
+				oneshot.trigger(); // トリガ
+			}
+		}
+	}
+
+	function start()  //开启定时器
+	{
+		// タイマ開始
+		timerEnabled = true;
+		timer.enabled = true;
+	}
+
+	function stop()  //停止定时器
+	{
+		// タイマ停止
+		timer.enabled = false;
+		oneshot.cancel();
+		timerEnabled = false;
+	}
+	function onError(e) { return false; }
+
+	property interrupted  //是否处于中断状态
+	{
+		getter() { return _interrupted; }
+		setter(x)
+		{
+			if(!x)
+			{
+				// enable
+				if(timerEnabled)
+				{
+					timer.interval = 0;
+					timer.enabled = true;
+					oneshot.mode = atmExclusive;
+						// イベントが配信されるまで他の非同期イベントをブロック
+					oneshot.trigger(); // トリガ
+				}
+			}
+			else
+			{
+				// disable
+				oneshot.cancel();
+				timer.enabled = false;
+			}
+			_interrupted = x;
+		}
+	}
+
+	function assign(src)
+	{
+		// src の状態をこのオブジェクトにコピー
+		var t = timer;
+		var st = src.timer;
+		t.enabled = false;
+		t.interval = st.interval;
+		nextTimerTick = src.nextTimerTick;
+		if(st.enabled && st.interval != 0)
+		{
+			// タイマ interval の調整
+			var delta = nextTimerTick - System.getTickCount();
+			if(delta > 0) t.interval = delta; else t.interval = 1;
+		}
+		t.enabled = st.enabled;
+		timerEnabled = src.timerEnabled;
+		_interrupted = src._interrupted;
+		if(src.pendings.count > 0)
+			pendings.assignStruct(src.pendings);
+		else
+			pendings.clear();
+
+		if(src.fasttags.count > 0)
+			fasttags.assignStruct(src.fasttags);
+		else
+			fasttags.clear();
+		if(src.nexttags.count > 0)
+			nexttags.assignStruct(src.nexttags);
+		else
+			nexttags.clear();
+
+		super.assign(src);
+	}
+
+	function store()
+	{
+		// store オーバーライド
+		return super.store(...);
+	}
+
+	function restore(dic)
+	{
+		// restore オーバーライド
+		clearInfo();
+		try{
+			super.restore(...);
+		}catch(e){
+			dm(e);
+		}
+	}
+
+	function loadScenario(storage)
+	{
+		// loadScenario オーバーライド
+		clearInfo();
+		super.loadScenario(storage);
+	}
+
+	function goToLabel(label)
+	{
+		// goToLabel オーバーライド
+		clearInfo();
+		super.goToLabel(...);
+	}
+	// 入队列
+	function enqueueTag()  {pendings.push(...);}
+	function enqueueFastTag() { fasttags.push(...); }
+	function enqueueNextTag() { nexttags.push(...); }
+	//	插队到最前方
+	function pushTag()        { pendings.unshift(...); } 
+	function pushFastTag()    { fasttags.unshift(...); }
+	function pushNextTag()    { nexttags.unshift(...); }
+}
+
+
+class Conductor extends BaseConductor
+{
+	// Conductor - シナリオ進行処理
+	/*const*/ var mStop = 0; // 停止
+	/*const*/ var mRun = 1; // 動作中
+	/*const*/ var mWait = 2; // 待ち
+
+	var owner;
+	var handlers;
+	var status = mStop;
+	var timeOutTimer;
+	var waitUntil = %[];
+	var waitAll = %[];
+	var lastTagName = ''; // 直前のタグ名
+
+	function Conductor(owner, handlers)
+	{
+		// コンストラクタ
+		super.BaseConductor();
+		ignoreCR = global.ignoreCR;
+		debugLevel = tkdlVerbose;
+		this.owner = owner;
+		this.handlers = handlers;
+		timeOutTimer = new Timer(onTimeOut, '');
+	}
+
+	function finalize()
+	{
+		// finalize()
+		invalidate timeOutTimer;
+		super.finalize(...);
+	}
+
+	function run(immediate = false)
+	{
+		// 実行の開始
+		// immediate=true の場合は、
+		// このメソッドを実行したらすぐに吉里吉里に制御を戻す
+		// (すべての関数から戻る)こと
+		cancelTimeOut();
+		status = mRun;
+		startProcess(immediate);
+	}
+
+	function sleep()
+	{
+		// 実行の停止
+		cancelTimeOut();
+		status = mStop;
+		stop();
+	}
+
+	function wait(until,all = false)	
+	{
+		// 待ち
+		// until = trigger で用いるシグナル名とコールバック関数の
+		// 辞書配列
+		cancelTimeOut();
+		status = mWait;
+		stop();
+		(Dictionary.clear incontextof waitUntil)();
+		(Dictionary.clear incontextof waitAll)();
+		if(all){
+			(Dictionary.assign incontextof waitAll)(until);
+		}
+		else{
+			(Dictionary.assign incontextof waitUntil)(until);
+		}
+	}
+
+	var waitStartTick; //< 待ち開始時間
+	var waitTimeout; //< 待ち予定時間
+
+	function waitWithTimeOut(until, timeout)
+	{
+		// 待ちを行うが、タイムアウトがある
+		// タイムアウト時には 'timeout' がトリガされるので
+		// ハンドラを定義すること。
+		if(timeout == 0) timeout = 1; // timeout が 0 の場合は 1 に
+		status = mWait;
+		stop();
+		(Dictionary.clear incontextof waitAll)();	// 清除all等待的事件
+		(Dictionary.assign incontextof waitUntil)(until);
+		timeOutTimer.interval = timeout;
+		timeOutTimer.enabled = true;
+		waitStartTick = System.getTickCount();
+		waitTimeout = timeout;
+	}
+
+	function cancelTimeOut()
+	{
+		timeOutTimer.enabled = false;
+		waitTimeout = 0;
+		waitStartTick = void;
+	}
+
+	function onTimeOut()
+	{
+		// timeOutTimer がタイムアウトした
+		cancelTimeOut();
+		trigger('timeout'); // 自分自身で timeout をトリガする
+	}
+	// 如果trigger获取到的方法返回 true ，代表需要继续暂停处理器，不会启动执行
+	function trigger(name)
+	{
+        // waitUntil 内にシグナル名 name が存在すれば、実行再開、   waitUntil内存在指定name的键值的话，继续执行指令解析
+		// 同時に waitUntil に登録されたメソッド(リスタートハンドラ)を呼ぶ   同时会呼叫键值对于的方法
+		// シグナル名に _arg がついたものが waitUntil 内にあれば、        如果存在同名加上_arg后缀的键，则作为参数传入
+		// それを引数としてハンドラに渡す
+		// waitUntil はクリアされる  清空 waitUntil
+		if(status != mWait) return false;
+		var func = waitUntil[name];
+		if(func !== void)
+		{
+			var arg = waitUntil[name + '_arg'];
+			(Dictionary.clear incontextof waitUntil)();// func 可能会再次触发trigger,所以先要清除
+			if(arg !== void)  func(arg);
+			else  func();
+			run();
+			return true;
+		}
+		else if(!isBlank(func=waitAll[name]))
+		{
+			var arg = waitUntil[name + '_arg'];
+			if(arg !== void) {
+				 func(arg);
+				delete waitAll[name + '_arg'];
+			} else func();
+			delete waitAll[name];	// 调用之后再删除 ，防止func触发此方法，导致执行栈未清除就开始执行
+			var temp=[];
+			temp.assign(waitAll);
+			if((temp.count == 2 && !isBlank(waitAll,"waitall")) || 	// 如果指定了waitall 作为结束时的方法
+				(temp.count == 4 && !isBlank(waitAll,"waitall") && !isBlank(waitAll,"waitall_arg") ))
+			{	
+				return trigger("waitall");
+			}else if( temp.count==0){
+				run();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	function onTag(elm)    //处理指令的逻辑
+	{
+		// タグの処理
+		var tagname = elm.tagname;
+		var ret = onBeforeTag(tagname, elm);
+		if (ret !== void) {
+			return ret;
+		}
+		var handler = handlers[tagname];
+		if(handler !== void)
+		{
+			ret = handler(elm);
+			lastTagName = tagname;
+			return ret;
+		}
+		return onUnknownTag(tagname, elm);
+	}
+
+	function onStop(eof)	// eof: 是否文件结束
+	{
+		// BaseConductor.onStop オーバーライド
+		// 停止時に呼ばれるのでステータスを mStop にする
+		status = mStop;
+		if(owner.conductor == this) handlers.s(); // ハンドラの s (停止) を呼ぶ
+
+		if (!isBlank(owner,"onConductorStop")) {
+			 	  owner.onConductorStop(eof, this);
+		}
+	}
+
+	function onScript(script, scriptname, lineofs)
+	{
+		// scirpt を実行する
+		try
+		{
+			Scripts.exec(script, scriptname, lineofs);
+		}
+		catch(e)
+		{
+			throw new Exception("the iscript block in " + lineofs + " lines of  " + scriptname + " has occured error" +
+				"\n( open console to check detail )\n" + e.message);
+		}
+		return true;
+	}
+
+	function store()
+	{
+		// store オーバーライド
+		return super.store(...);
+	}
+
+	function restore(dic)
+	{
+		// restore オーバーライド
+		super.restore(...);
+		lastTagName = '';
+	}
+
+	function onScenarioLoad()
+	{
+		return owner.onConductorScenarioLoad(...);
+	}
+
+	function onScenarioLoaded()
+	{
+		return owner.onConductorScenarioLoaded(...);
+	}
+
+	function onLabel(label, page)
+	{
+		return owner.onConductorLabel(label, page);
+	}
+
+	function onJump()
+	{
+		return owner.onConductorJump(...);
+	}
+
+	function onCall()
+	{
+		return owner.onConductorCall(...);
+	}
+
+	function onReturn()
+	{
+		return owner.onConductorReturn(...);
+	}
+
+	function onAfterReturn()
+	{
+		return owner.onConductorAfterReturn(...);
+	}
+
+	function onScript()
+	{
+		return owner.onConductorScript(...);
+	}
+
+	function onBeforeTag()
+	{
+		return owner.onConductorBeforeTag(...);
+	}
+
+	function onUnknownTag()
+	{
+		return owner.onConductorUnknownTag(...);
+	}
+
+}
+
+
+/**
+ * 遅延処理つきコンダクタ	延迟处理 控制器
+ */
+class DelayConductor extends Conductor {
+
+	function DelayConductor(owner, handlers) {
+		super.Conductor(owner, handlers);
+		delaytags = [];
+	}
+	var reNumber = new RegExp("^[0-9][0-9]*$");
+	// 遅延実行機能
+	var delaytags; // 遅延実行タグ
+
+	function clearInfo() {
+		super.clearInfo();
+		delaytags.clear();
+	}
+	// 取出指令后 执行指令前拦截
+	function checkNextParseTag(obj, tick) {// 将传入的指令添加到delaytags中，添加delayrun的属性
+		// 遅延実行タグa		延迟执行指令
+		if (obj.delayrun !== void) {
+			//obj = Scripts.clone(obj); // [XXX] 複製方法を後で調整する
+			var delayrun = obj.delayrun;
+			if (reNumber.test(delayrun)) {
+				addTagParam(obj, "delayrun", (+delayrun));	//是数字则转化为数字
+			}
+			delaytags.add(obj);
+			// callOwnerMethod("initDelay", obj.delayrun); TODO 以后查看delay的方法
+			return true; // 跳过该指令
+		}
+	}
+
+	// 遅延タグの全キャンセル		取消全部延迟tag
+	function cancelDelay() {
+		delaytags.clear();
+	}
+
+	/** 
+	* @description: 	以参数的字典中存在的值  重新设置指令的 delayrun 属性，
+	* @param delayLabels	想要设置的包含的指令的字典
+	* @return 
+	*/
+	function startDelay(delayLabels) {
+		var l = delaytags.count;
+		for (var i=0;i<l;i++) {
+			var obj = delaytags[i];
+			var delayrun = obj.delayrun;
+			var isNumber = typeof delayrun == "Integer";
+			if (!isNumber && delayrun != "") {	// 只对非时间delay起作用
+				if (delayrun.indexOf(",") >= 0) {	// delayrun是以逗号分割， 则如果全都不存在于delayLabels中则移除,存在至少一个则只留开头的一个
+				// カンマ区切りの場合は存在するものの先頭を残す
+					delayrun = delayrun.split(",");
+					for (var i=delayrun.count-1;i>=0;i--) {			// 除去不存在的label
+						if (delayLabels[delayrun[i]] === void) {
+							delayrun.erase(i);
+						}
+					}
+					if (delayrun.count > 0) {
+						obj.delayrun = delayrun[0];
+					} else {
+						obj.delayrun = void;
+					}
+				} else {
+					// その他の場合は存在しなければ解除		其他情况下不存在于	delayLabels 中则解除 delayrun
+					if (delayLabels[delayrun] === void && !obj.nodelaydone) {
+						obj.delayrun = void;
+					}
+				}
+			}
+		}
+	}
+	
+	/**
+	 * 遅延タグの展開	执行全部延迟指令
+	 * @param value 数値ならtick 文字列ならラベル   为数值则为 tick  字符串则为 标签
+	 * @param all 全タグを展開	是否执行全部延迟的指令
+	 */
+	function extractDelay(value, all=false) {
+		//dm(@"extractDelay:${value}:${delaytags.count}");
+		//if (delaytags.count > 0) {
+		//    dm("遅延タグ解放:" + value);
+		//}
+		var n = 0;
+		var l = delaytags.count;
+		for (var i=0;i<l;) {
+			var delFlag = false;
+			var obj = delaytags[i];
+			var delayrun = obj.delayrun;
+			var isTick   = typeof value == "Integer";
+			var isNumber = typeof delayrun == "Integer";
+			if (all ||									//	指定全部展开
+				(value === void && !obj.nodelaydone) ||	// 指定value为空且 指令的 nodelaydone 为false
+				delayrun === void ||					//	指令的 delayrun 为空 
+				(isTick && isNumber && delayrun - value <= 0) ||		// 指定 value 为数值 并且 指令的 delayrun 为数值，且value大于delayrun
+				(!isTick && !isNumber && (delayrun == value || value == "*"))) {	// value不是tick 并且 delayrun也不是数值 ，和value对应或value为*
+				removeTagParam(obj, "delayrun");
+				//dm("タグ遅延実行:" + obj.tagname);
+				if (!interrupted) {		//如果指令没有导致指令解析器暂停
+					if (timerEnabled) {
+						// タイマ駆動中ならそのままコマンドを投入	定时器在运行中则直接放入指令队列
+						pendings.insert(n++, obj);
+					} else {
+						// タイマが駆動してない(待ち)ならコマンドを直接実行		未在运行中则直接执行
+						var step = onTag(obj);
+						if (step != 0 && step != -4) {
+							dm("タグ遅延実行:%s ステート:%d:誤動作の可能性があります".sprintf(obj.tagname,step));
+						}
+						// fasttags は全部実行		执行全部优先指令队列
+						while (fasttags.count > 0) {
+							var obj = fasttags[0];
+							var step = onTag(obj);
+							if (step != 0 && step != -4) {
+								dm("タグ遅延実行:%s ステート:%d:誤動作の可能性があります".sprintf(obj.tagname,step));
+							}
+							fasttags.erase(0);
+						}
+					}
+					delaytags.erase(i);
+					delFlag = true;
+				}
+			}
+			if (delFlag) {
+				l--;		//	否则数组大小减少
+			} else {
+				i++;		//没有执行指令则游标向前移到
+			}
+		}
+	}
+
+	function hasDelay() {
+		return delaytags.count > 0 || waitUntil["delay_*"] !== void;
+	}
+
+	// 親メソッド呼び出し	调用owner方法
+	function callOwnerMethod(method, *) {
+		return (typeof owner[method] == "Object") ? owner[method](*) : void;
+	}
+}
+
+class MainConductor extends DelayConductor {
+
+	var runLine;           // 通過中の行番号				通过中的行号
+	var runCount;          // 通過中のコマンド番号			通过中的指令号
+	var runLineStr;        // 通過中のテキスト情報			通过中的文本信息
+	var runLabel;          // 最後に通過したラベル			最后通过的标签
+	var runLabelLine = 0;  // 最後に通過したラベルの行番号	 最后通过的标签时的运行行号
+	var saveLine;          // 保存用行番号					保存用的行号
+	var saveCount;         // 保存用コマンド番号			保存用的指令号
+	var targetLabel;       // ロード処理ターゲット行の前の基準ラベル	读取处理目标行前的基准标签
+	var targetLine;        // ロード処理ターゲット行			读取处理的目标行
+	var targetCount;       // ロード処理ターゲットコマンド		读取处理目标指令
+
+	function MainConductor(owner, handlers) {
+		super.DelayConductor(owner, handlers);
+	}
+
+	function finalize() {
+		super.finalize();
+	}
+
+	// ----------------------------------
+	
+	function clearInfo() {
+		super.clearInfo();
+		targetLine = void;
+		runLabel = "";
+		runLabelLine = 0;
+		runLine = 0;
+		runCount = 0;
+		saveLine = runLine;
+		saveCount = runCount;
+	}
+
+	/** 
+	* @description: 	获得下一条指令信息，增加了记录runcount 的功能，支持单行多指令模式
+	* @return 
+	*/
+	function getNextTag() {
+		var ret;
+		do {
+			try {
+				ret = super.getNextTag();
+				
+			} catch(e) {
+				dm(%[file:curStorage, line:curLine]);
+				dm(e.message);
+				ret = null;
+			}
+		} while (ret === null);
+		if (ret !== void) {
+			// 行情報を更新			更新行信息
+			if (runLine  != curLine) {	
+				runLine    = curLine;
+				runCount   = 0;
+				runLineStr = curLineStr;
+				callOwnerMethod("updateDebugInfo");
+			}
+			runCount++;		// 行的第一条指令此值为1
+			ret.runLine    = runLine;
+			ret.runLineStr = runLineStr;
+			ret.runCount = runCount;
+		}
+		return ret;
+	}
+
+
+	// 取出指令过程 取指令后的拦截
+	function checkNextTag(obj) {
+		// 行復帰処理
+		//dm(targetLine + "," + targetCount);
+		if (targetLine !== void) {	
+			//恢复存档的处理，当前的runcount小于targetcount则说明未到达存档时的指令，到达之前忽略全部标签的处理
+			if (runLine > targetLine  ||(runLine >= targetLine && runCount >= targetCount)) {
+				dm("the restore is completed!");
+				if(targetLine==runLine && runCount == targetCount){
+					targetLine = void;
+					return false;
+				}
+				targetLine = void;
+				enqueueNextTag(%[tagname:"break",taglist:["break"]]);	//返回-4，不作处理
+			}
+			return true;
+		}
+		// パース時に強制実行する		解析时强制执行 parserun 
+		if (!isBlank(obj,"parserun")&& obj.parserun) {
+			onTag(obj);
+			return true;
+		}
+		return false;
+	}
+	// 指令执行过程 执行指令前拦截
+	function checkNextParseTag(obj, tick) {
+		// アウトライン記述部を強制的に飛ばす処理(コンバートモードでのみ使える機能)	outline 记录部分强制跳过处理（仅compat模式使用）
+		if (obj.tagname == "outline") {
+			do {
+				obj = getNextParseTag();
+				if (obj.tagname == "endoutline") {
+					obj = getNextParseTag();
+					break;
+				}
+			} while (obj !== void);
+			if (obj === void) {
+				throw new Exception("outline is not closed!");
+			}
+		}
+		
+		if (obj.runLine !== void) {		// 真正执行时 更新用于存档的记录
+			// タグ数更新	更新指令数
+			saveLine = obj.runLine;
+			saveCount = obj.runCount;
+		}
+
+		return super.checkNextParseTag(obj, tick);
+	}
+
+	function store() {
+		var ret = super.store(...);
+		ret.runLine      = saveLine;
+		ret.runCount     = saveCount;
+		ret.runLabel     = runLabel;
+		ret.runLabelLine = runLabelLine;
+		return ret;
+	}
+
+	function restore(dic) {
+		super.restore(dic);
+		if(isBlank(dic.runLine))return;
+
+		clearInfo();
+		// 回滚到上次的标签位置
+		super.loadScenario(dic.storageName);
+		if (dic.runLabel != "") {
+			super.goToLabel(dic.runLabel);
+			owner.setRecordLabel(curStorage,dic.runLabel); 
+			runLabel = dic.runLabel;
+			runLine = runLabelLine = curLine;
+			if (runLine != dic.runLabelLine) {	//当前行  与存档中的通过标签后的行不同，说明存档或剧本变更
+				onRestoreLabelError();
+				return;
+			}
+		}
+		// 回滚到没有标签记录的上次的指令行位置
+		saveLine = targetLine  = dic.runLine;
+		saveCount = targetCount = dic.runCount;
+		targetLabel = dic.runLabel;
+	}
+	///--------------------------------
+	function onLabel(label, page)
+	{
+		if (targetLine !== void) {
+			if (label !== targetLabel) {
+				onLabelModifiedError();
+				return true;
+			}
+		}
+	
+		runLabel     = label;
+		runLabelLine = curLine;
+		return owner.onConductorLabel(label,page);
+	}
+
+	function onJump()
+	{
+		if (targetLine !== void) return true;
+		return owner.onConductorJump(...);
+	}
+
+	function onCall()
+	{
+		if (targetLine !== void) return true;
+		return owner.onConductorCall(...);
+	}
+
+	function onReturn(dic)
+	{
+		if (targetLine !== void) return true;
+		return owner.onConductorReturn(...);
+	}
+
+	function onAfterReturn()
+	{
+		runLabel = curLabel;
+		if (targetLine !== void) return true;
+		return owner.onConductorAfterReturn(...);
+	}
+
+	function onScript()
+	{
+		if (targetLine !== void) return true;
+		return owner.onConductorScript(...);
+	}
+	
+	// 各種エラー対応
+	function onRestoreLabelError() {
+		askYesNo("Changes in script tag positions were detected.\n Errors may occur, do you want to continue?",
+				 "yes", function {}, function { targetLine = void; owner.goToStart(); } incontextof this);
+	}
+	function onLabelModifiedError() {
+		askYesNo("Inconsistencies in script tags were discovered. Normal operation cannot be guaranteed,\n would you like to restart from the beginning of the script?",
+				 "yes", function(param) { process(param);} incontextof owner, owner.goToStart, curStorage);
+	}
+};
+
+
+
+
+

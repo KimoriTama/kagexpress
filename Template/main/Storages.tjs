@@ -1,0 +1,91 @@
+/*
+検索パスの追加登録方法：
+ setupSubFolders([ サブフォルダ名, ... ]);
+  サブフォルダ名：data/以下のフォルダ名。サブサブフォルダ以下は"/"で区切る
+ */
+
+addArchive("steam");
+
+// ※「adultsonly」フォルダは特殊対応のため，ここへのサブフォルダ登録不要です（存在するフォルダが自動検索で追加されます）
+setupSubFolders([
+	/* 記述例：
+	"scenario/part1"
+	"scenario/part2"
+
+	"fgimage/chara1",
+	"fgimage/chara2",
+
+	"image/cutin",
+	"image/effect/type1",
+	"image/effect/type2",
+
+	"voice/chara1",
+	"voice/chara2",
+	 ここまでコメント */
+// システム系画像（スクランブル画像等）
+	"image/sys",
+
+// 立ち絵のサブフォルダを登録
+	"fgimage/１－寧々",
+	"fgimage/２－めぐる",
+	"fgimage/３－紬",
+	"fgimage/４－憧子",
+	"fgimage/５－和奏",
+	"fgimage/６－七緒",
+	"fgimage/７－佳苗",
+	"fgimage/８－秀明",
+	"fgimage/９－太一",
+	"fgimage/１０－アカギ",
+	"fgimage/１１－越路",
+	"fgimage/１２－その他特殊",
+
+// ボイスのサブフォルダを登録
+	// "voice/０－システムボイス",
+	"voice/０－システムボイス",
+	"voice/１－寧々",
+	"voice/２－めぐる",
+	"voice/３－紬",
+	"voice/４－憧子",
+	"voice/５－和奏",
+	"voice/６－七緒",
+	"voice/７－佳苗",
+	"voice/８－秀明",
+	"voice/９－太一",
+	"voice/１０－アカギ",
+	"voice/１１－越路",
+	"voice/１２－モブ",
+	"voice/１３－その他特殊",
+
+	]);
+
+/*
+@if (DEBUG && !PACKED)
+{
+	// scenario以下の再帰フォルダ検索
+	var recursive = function (self, base, ds, top) {
+		if (!Storages.isExistentDirectory(base)) return;
+		if (!top && !ds) {
+			dm("*** subfolder add:"+base);
+			Storages.addAutoPath(base);
+		}
+		var list = Storages.dirlist(base);
+		for (var i = 0, cnt = list.count; i < cnt; i++) {
+			var name = (string)(list[i]);
+			if (name == "" || name.charAt(0) == "." || name.charAt(name.length-1) != "/") continue;
+			if (!ds) self(self, base + name);
+		}
+	} incontextof global;
+	var linked;
+	try {
+		var dll = "PackinOne.dll";
+		Plugins.link(dll) if (CanLoadPlugin(dll));
+		linked = true;
+	} catch {}
+
+	if (linked) {
+		recursive(recursive, System.exePath+"scenario/", void, true);
+	}
+}
+@endif*/
+// 这个是草猫2增加的修改
+// KAGLoadScript("append_init.tjs");

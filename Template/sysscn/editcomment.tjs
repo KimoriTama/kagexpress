@@ -1,0 +1,54 @@
+SetSystemConfigDefaults(
+	%[
+	EditCommentDialogTextHeight: 28,
+	EditCommentDialogOK:     "決定",
+	EditCommentDialogCancel: "キャンセル",
+	EditCommentDialogInitParam:
+		%[
+		padding:3,
+		width:150, fontSize:12, fontFace:"ＭＳ ゴシック",
+		],
+	]);
+
+/**
+ * コメント編集ダイアログ
+ */
+class        EditCommentDialog extends WIN32GenericDialogEX {
+	function EditCommentDialog(title, caption, text) {
+		var elm = %[ title:title ], textHeight;
+		with (SystemConfig) {
+			textHeight = .EditCommentDialogTextHeight;
+
+			var elmov  = .EditCommentDialogInitParam;
+			if (elmov !== void)
+				(Dictionary.assign incontextof elm)(elmov, false);
+
+			elm.itemtexts = %[] if (elm.itemtexts === void);
+			elm.itemtexts.Text = caption;
+			elm.itemtexts[IDOK] =     .EditCommentDialogOK;
+			elm.itemtexts[IDCANCEL] = .EditCommentDialogCancel;
+		}
+		super.WIN32GenericDialogEX(elm);
+		text = (string)text;
+		if (text != "") text = text.replace(/\n/g, "\r\n");
+		addTextInput("Text", textHeight, void, text);
+		getLastItem().style &= ~(ES_AUTOHSCROLL|WS_HSCROLL);
+		nextLine();
+		addButton(IDOK,     makeStepRight(1, 50), 2);
+		addButton(IDCANCEL, makeStepRight(0, 50), 2);
+	}
+	function onInit() {
+		super.onInit(...);
+		setCenterPosition(global.Window.mainWindow);
+//		sendItemMessage("Text", EM_LIMITTEXT, 16, 0);
+		sendItemMessage("Text", EM_SETSEL, 0, -1);
+		setItemFocus("Text");
+	}
+	function open() {
+		var r = super.open(...), text;
+		try {  text = (r.result == IDOK) ? r.items.Text : void; } catch {}
+		if (text != "") text = text.replace(/\r/g, "");
+		return text;
+	}
+}
+

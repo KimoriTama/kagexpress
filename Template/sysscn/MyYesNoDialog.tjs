@@ -1,0 +1,563 @@
+// YesNoDialog の改変
+
+/**
+ * ウインドウ版
+ */
+class MyYesNoDialogWindow extends Window
+{
+	var baseLayer; // ベース部分
+	var result = false; // no:false yes:true
+	var isMain = false;
+	var maskThreshold; // マスク切り抜きの閾値
+	var callback;
+
+	var tempLayer;
+	property temporaryLayer
+	{
+		// ワークエリアとして一時的に使用できるレイヤを返す
+		getter()
+		{
+			if(tempLayer === void)
+			{
+				tempLayer = new KAGLayer(this, primaryLayer);
+				tempLayer.name = "temp layer";
+			}
+			return tempLayer;
+		}
+	}
+	property drawspeed {
+		getter{ return global.Window.mainWindow.drawspeed; }
+	}
+	function onAnimationStopped(){}
+	function processKeys(key, shift)
+	{
+		// nothing to do
+	}
+
+	function getKeyState(key)
+	{
+		// System.getKeyState 関数と同等だが、パッドのキーに関しても
+		// 反応を返す
+		var sg = System.getKeyState;
+		var state = sg(key);
+		if(state) return true;
+		var pad_key = kag.padKeyMapReverse[key];
+		if(pad_key !== void)
+		{
+			// キーコード -> パッドのキーコードの変換が見つかった
+			return sg(pad_key);
+		}
+		return false;
+	}
+
+
+	// マウスカーソル形状の設定
+	function setCursorDefault(mainWindow) {
+		// mainWindowがない場合は何もしない
+		if (isBlank(mainWindow)) return;
+
+		// メインウィンドウから cursorDefault の情報をとってくる
+		if (typeof mainWindow.cursorDefault != "undefined") 
+			this.cursorDefault = mainWindow.cursorDefault; // プライマリのマウスカーソルもついでに設定
+
+		// cursorPointed も同様に取得
+		if (typeof mainWindow.cursorPointed != "undefined")
+			this.cursorPointed = mainWindow.cursorPointed;
+	}
+
+
+	// ベースダイアログレイヤの生成
+	function createBaseLayer(part, cls, cb) {
+		callback = cb;
+		cls = global.MyYesNoDialogLayer if (cls === void || !(typeof cls == "Object" && cls instanceof "Class"));
+		var lay = new cls(this, part, this.doneFunc);
+		lay.close = function() {}; // closeを潰す
+		lay.setPos(0, 0);
+		return lay;
+	}
+
+	// 各種初期化
+	function initWindowStyle(bw, bh) {
+
+		var kag = global.Window.mainWindow;
+		if (!isBlank(kag)) {
+			// 拡大率の設定
+			if (kag.fullScreen) {
+				if (kag.innerWidth / kag.scWidth < kag.innerHeight / kag.scHeight)
+					setZoom(kag.innerWidth, kag.scWidth);
+				else
+					setZoom(kag.innerHeight, kag.scHeight);
+			} else {
+				setZoom(kag.zoomNumer, kag.zoomDenom);
+			}
+		}
+		var zoomw = bw * zoomNumer / zoomDenom;
+		var zoomh = bh * zoomNumer / zoomDenom;
+		setInnerSize(zoomw, zoomh); // サイズをあわせる
+
+		// 透明部分を抜く
+		with (primaryLayer) {
+			.type = ltAlpha;
+			.setSize(bw, bh);
+			.fillRect(0, 0, bw, bh, 0);
+			var tmp = new Layer(this, primaryLayer);
+			tmp.setImageSize(bw, bh);
+			tmp.piledCopy(0, 0, primaryLayer, 0, 0, bw, bh);
+			.setImageSize(zoomw, zoomh);
+			.setSizeToImageSize();
+			.stretchCopy(0, 0, width, height, tmp, 0, 0, bw, bh);
+			setMaskRegion(maskThreshold);
+			.setSize(bw, bh);
+			.fillRect(0, 0, bw, bh, 0);
+			invalidate tmp;
+        }
+
+		// プライマリレイヤのマウスカーソル設定
+		primaryLayer.cursor = this.cursorDefault if (typeof this.cursorDefault !== "undefined");
+
+		// ウィンドウ位置の調整
+		var pos = getParentWindowCenterPos(global.Window.mainWindow, width, height);
+		if (pos !== void) with (pos) setPos(.x, .y);
+	}
+
+	// コンストラクタ
+	function MyYesNoDialogWindow()
+	{
+		super.Window();
+
+		drawDevice.preferredDrawer = 2; // GDI優先
+		// マスク切り抜きの閾値
+		maskThreshold = SystemConfig.DialogMaskThreshold;
+
+		// 外見の調整
+		borderStyle = bsNone;
+
+		// マウスカーソル設定
+		var w = 800, h = 600;
+		setCursorDefault(kag);
+		if (!isBlank(kag)) with (kag) {
+			w = kag.scWidth;
+			h = kag.scHeight;
+		}
+		// プライマリレイヤ
+		add(new Layer(this, null));
+		primaryLayer.setSize(w,h);
+		primaryLayer.visible = true;
+		
+		var bw, bh;
+		with (baseLayer = createBaseLayer(...)) {
+			.visible = true;
+			bw = .width;
+			bh = .height;
+			.setPos(-.left, -.top);
+		}
+
+		
+		// 各種初期化
+		initWindowStyle(bw, bh);
+	}
+	property defaultFocusItemName {
+		getter { return baseLayer !== void ? baseLayer.defaultFocusItemName : void; }
+		setter(v) { if (baseLayer !== void)  baseLayer.defaultFocusItemName = v; }
+	}
+
+	// デストラクタ
+	function finalize()
+	{
+		invalidate tempLayer if tempLayer !== void;
+		super.finalize(...);
+		invalidate baseLayer;
+	}
+
+	function start() {
+		baseLayer.onOpen();
+		showModal();
+		return result;
+	}
+	function open() {
+		var r = start();
+		callback(r) if (callback !== void);
+		return r;
+	}
+	function addHook(){}
+	function removeHook(){}
+
+	function doneFunc(r) {
+		result = r;
+		close();
+	}
+
+	// エスケープキャンセル
+	function onKeyDown(key, shift)
+	{
+		super.onKeyDown(...);
+		if (key == VK_ESCAPE) {
+			result = false;
+			close();
+		}
+	}
+
+	// 右クリックキャンセル
+	function onMouseDown(x, y, button)
+	{
+		if (button == mbRight) {
+			result = false;
+			close();
+		}
+	}
+}
+
+class CursorMoveAction extends AbsoluteActionHandler{
+	var _lastPos; //上次的鼠标位置
+	var _targetPos;	// 目标的位置
+	var _cancel = false; //是否取消动作
+	var _threshold = 4;
+	var _start;
+    function CursorMoveAction(target, elm) {
+		super.AbsoluteActionHandler(target, elm);
+		_targetPos = elm.value;
+		_threshold = elm.threshold if !isBlank(elm.threshold);
+	}
+	/**
+	 * 実行初回処理
+	 */
+	function init() {
+		_start = _target.value;	// 获取初始位置
+		_lastPos = _target.value;	
+	}
+
+	function doAction(now, stopFlag) {
+		if(_cancel)return true;
+		if (_time == 0 || stopFlag) {
+			_target.value = _targetPos;
+			return true;
+		} else {
+			if (Math.abs(_lastPos-_target.value) > _threshold) return (_cancel=true);
+			_target.value =  (_targetPos - _start)*now/_time + _start;
+			_lastPos = _target.value;
+			return false;
+		}
+	}
+	function store(){
+		var dic = super.store();
+		dic.handler = "CursorMoveAction";
+		dic.value =  _targetPos;	// 目标的位置
+		dic.threshold = _threshold;
+		return dic;
+	}
+}
+/**
+ * ダイアログ版
+ * SystemConfig.DialogStorgae			对话框ui存储名
+ * SystemConfig.DialogFadeTime 			渐变时间
+ * SystemConfig.DialogCursorMoveTime 	鼠标移动时间
+ * SystemConfig.DialogMaskThreshold 	遮罩区域透明度
+ */
+class MyYesNoDialogLayer extends DialogLayer
+{
+	var callback, trig1, trig2;	
+	var result;			// 临时存出结果 用于关闭时的回调
+
+	function MyYesNoDialogLayer(win, part, callback, dark) {
+		var storage = SystemConfig.DialogStorgae;
+		super.DialogLayer(win, win.primaryLayer, "MyYesNoDialogLayer : " + storage);
+		selProcessLock = true;
+
+		this.callback = callback;
+		trig1 = createTrigger("focusItemPhase2", atmAtIdle);
+		trig2 = createTrigger("focusItemPhase3", atmAtIdle);
+		var opacity = 255, color = 0;
+		if (dark) opacity=128;
+		uiload(this,%[ storage:storage, partexcept:part, opacity:opacity, color:color]);
+	}
+
+	function finalize() {
+		invalidate trig1 if (trig1 !== void && isvalid trig1);
+		invalidate trig2 if (trig2 !== void && isvalid trig2);
+		setClickHook(false);
+		super.finalize();
+	}
+
+	property inDialogWindow { getter { return window instanceof "MyYesNoDialogWindow"; } }
+
+	function createTrigger(method, idle) {
+		var trig;
+		with (trig = new AsyncTrigger(this, method)) {
+			.mode = idle;
+			.cached = true;
+		}
+		return trig;
+	}
+
+	var defaultFocusItemName;
+	var _fcitem;
+	function focusItem(name) {
+		var time = SystemConfig.DialogCursorMoveTime;
+//		parent.focusedLayer = null;
+		var target;
+		target = this.names[name] if (name != "");
+		target = this.names.no  if (target === void);
+		target = this.names.yes if (target === void);
+		// 时间为0时，替换聚焦的一种方式
+		if (!time) focusItemPhase1(target);	
+		else if (time > 0 && target && isvalid target) with (target){
+			.addAction("move",true,[
+				%[cursorX:%[handler:CursorMoveAction,value:.width\2,time:time],cursorY:%[handler:CursorMoveAction,value:.height\2,time:time]]
+			]);
+			if(!isBlank(SystemMenuManager)){
+				var temp = SystemMenuManager.menuAutoModeEnabled;
+				SystemMenuManager.menuAutoModeEnabled=false; 
+				.setActionComplete("move",@"function(){SystemMenuManager.menuAutoModeEnabled=${temp};}"!);
+			}
+		}
+	}
+	// 阶段1 先无效，聚焦
+	function focusItemPhase1(target) {
+		if ((_fcitem = target) === void) return;
+		if (_fcitem && isvalid _fcitem) with (_fcitem) {
+			.enabled = false;
+			setFocusToLink(.linkNum, true);
+		}
+		trig1.trigger();
+	}
+	// 阶段2 变有效
+	function focusItemPhase2() {
+		if (!isvalid this) return;
+		_fcitem.enabled = true if (_fcitem && isvalid _fcitem);
+		trig2.trigger();
+	}
+	// 阶段3 继续聚焦
+	function focusItemPhase3() {
+		if (!isvalid this) return;
+		setFocusToLink(_fcitem.linkNum, true) if (_fcitem && isvalid _fcitem);
+		_fcitem = void;
+	}
+	/**
+	 * 	不点击任何地方，关闭对话框的方法，回调函数参数固定为0
+	 * @param playse		是否播放音效
+	 */
+	function close(playse = true) {
+		// ESC や右クリックでキャンセルされた場合にもコールバックを呼ぶ
+		//playSysSE("dialog.close") if (playse); todo 音效
+		enabled = false;
+		window.closeDialog(this);
+		setClickHook(false);
+	}
+
+	function open() {
+		window.openDialog(this);
+		setClickHook(true);
+		if (SystemConfig.DialogFadeTime  > 0 && !inDialogWindow) {
+			this.opacity = 0;
+		}
+    }
+	function onOpen() {
+		selProcessLock = false;
+		/*var se = getSysSE("dialog.open");  todo 音效处理
+		playSysSE(se) if (stateSysSE(se) != "play");*/
+		focusItem(defaultFocusItemName);
+		if (SystemConfig.DialogFadeTime  > 0 && !inDialogWindow) {
+			showHideFade(true, SystemConfig.DialogFadeTime );
+		}
+	}
+
+	function setClickHook(en) {
+		if (en) setClickHook(false);
+		var set = en ? window.addHook : window.removeHook;
+		set("leftClick",  this.leftClickHook);
+		set("rightClick", this.rightClickHook);
+	}
+	function leftClickHook()  { return true; }
+	function rightClickHook() {
+		if (enabled) close();
+		return true;
+	}
+	//--------------------特性的操作----------------------------
+	function onLinkTrigger(num,data){
+		var ln = links[num];
+		if (isBlank(ln)) return;
+		result = onItemClick(ln.object.name);
+		if (SystemConfig.DialogFadeTime > 0 && !inDialogWindow) {
+			showHideFade(false, SystemConfig.DialogFadeTime);
+		}
+		else 
+			invokeCallback();
+	}
+
+	function invokeCallback() {
+		callback(result) if (callback !== void);
+		if (this isvalid) {
+			callback = void;
+			close(false);
+		}
+	}
+
+	// get result
+	function onItemClick(name) {
+		return ((name == "yes") || (name.indexOf("はい") >= 0));
+	}
+
+	/**
+	 * 	渐变显示(隐藏)此对话框，如果为隐藏还会调用结束时的回调函数
+	 * @param vis		显示/隐藏
+	 * @param fadeTime		渐变时间
+	 */
+	function showHideFade(vis, fadeTime = 300) {
+		var from = vis ?   0:255;
+		var to   = vis ? 255:  0;
+		delAction("fade");
+		addAction("fade",true, [
+			%[opacity: %[ handler:MoveAction, start:(opacity=from), value:to, time:fadeTime ]] ]);
+		setActionComplete("fade",@"function { onShowHideFadeDone(${vis}, ${enabled}) if (isvalid this); }"! incontextof this);
+		visible = true;
+		enabled = false;
+		
+	}
+
+	function onShowHideFadeDone(vis, en) {
+		visible = vis;
+		enabled = en;
+		if (vis && en && focusable) {
+			super.setMode() if (isSetMode); // enabled 重新设置会导致setMode失效，所以会重新设置
+			focus();
+		}
+		if (!vis) invokeCallback();
+	}
+
+	
+	function onKeyDown(key, shift)
+	{
+		// モーダル状態ではキーを全て集めてしまうため，keyDownHook が無効になってしまう
+		if (isSetMode && window.preProcessKeys(key, shift)) return;
+
+		if(key == VK_ESCAPE)
+		{
+			close();
+			return;
+		}
+		return super.onKeyDown(...); 
+    }
+
+	function onMouseUp(x, y, button, shift)
+	{
+        // 右クリックでなにもせずに閉じる（キャンセル扱い）
+        if (enabled && button == mbRight) close();
+        if (this isvalid) super.onMouseUp(...);
+	}
+}
+
+class MyYesNoDialog {
+	var DIALOG_PREFIX = "dialog.";
+	var origAskYesNo;
+	function MyYesNoDialog(orig) { origAskYesNo = orig; }
+	function finalize() {}
+	class AskYesNoCallbacks {
+		function AskYesNoCallbacks(yesFunc, noFunc, param, doneFunc) {
+			this.yesFunc  = yesFunc;
+			this.noFunc   = noFunc;
+			this.param    = param;
+			this.doneFunc = doneFunc;
+		}
+		function finalize() {}
+		function Invoke(result) {
+			// コールバック呼び出し
+			yesFunc( param) if (yesFunc !== void &&  result);
+			noFunc(  param) if ( noFunc !== void && !result);
+			doneFunc(param) if (doneFunc !== void);
+		}
+	}
+	// メッセージ⇒ UI定義part名へのマップ
+	var yesnoMap = %[
+		"最初に戻ります。よろしいですか ?" => "AskTitle",
+		"終了しますか？"                   => "AskExit",
+		"初期化してよろしいですか？"       => "AskInit",
+		"ロードしてよろしいですか？"       => "AskLoad",
+		"上書きしてよろしいですか？"       => "AskOverwrite",
+		"クイックロードしますか？"         => "AskQLoad",
+		"クイックセーブしますか？"         => "AskQSave",
+		"前の選択肢に戻りますか"           => "AskBackTo",
+		"次の選択肢に進みますか"           => "AskNext",
+		"クイックセーブしました"           => "DoneQSave",
+		"クイックロードしました"           => "DoneQLoad",
+		];
+
+	// 全一致でなく部分一致用のマップ
+	var yesnoMatch = [
+		"まで戻りますか?" => "AskBackTo",
+		"冒頭から再開しますか？" => "AskStartFail",
+		"そのまま再開しますか？" => "AskLabelChanged",
+		"をはさみますか?" => "AskSave",
+		"をたどりますか?" => "AskLoad",
+		];
+
+	var forceYesMap = %[
+	AskOverwrite:function { return (global.SystemConfig !== void) ? !(global.SystemConfig.askOverwrite)  : false; },
+	AskInit:     function { return (global.SystemConfig !== void) ? !(global.SystemConfig.askInit)       : false; },
+	AskTitle:    function { return (global.SystemConfig !== void) ? !(global.SystemConfig.askTitle)      : false; },
+	AskExit:     function { return (global.SystemConfig !== void) ? !(global.SystemConfig.askExit)       : false; },
+		];
+
+	var _defaultFocusItem = %[];
+	property defaultFocusItem {
+		setter (v) { _defaultFocusItem = v; }
+		getter {
+			return (global.SystemConfig !== void &&
+					typeof SystemConfig["dialogDefaultFocusTable"] == "Object")
+				?          SystemConfig["dialogDefaultFocusTable"] : _defaultFocusItem;
+		}
+	}
+
+	function useWindowDialog {
+		return (kag.isMoviePlaying() && kag.movies[0].mode != vomLayer);
+	}
+
+	function hasUiStorage() {
+		return (Storages.isExistentStorage(SystemConfig.DialogStorgae + ".func"));
+	}
+	function askYesNo(msg, caption = "confirm", yesFunc, noFunc, param, doneFunc) {
+		var useCustom = hasUiStorage();
+
+		// コールバック用オブジェクト
+		var cb = new AskYesNoCallbacks(yesFunc, noFunc, param, doneFunc);
+
+		// 強制yes設定の場合はダイアログを表示しない
+		var force = (msg != "") ? forceYesMap[msg] : false;
+		force = force() if (typeof force == "Object");
+		if (force) return cb.Invoke(true);
+
+		// フォーカスアイテム
+		var focus = (msg != "") ? defaultFocusItem[msg] : "";
+		global.MyYesNoDialog.currentTextPart = msg;
+
+		if (useCustom) {
+			// ムービーが再生されているときはウィンドウ版で／そうでないときはレイヤーから
+			var useWin = useWindowDialog();
+			var dialog = (useWin ?
+						  (new MyYesNoDialogWindow(msg, MyYesNoDialogLayer, cb.Invoke)) :
+						  (new MyYesNoDialogLayer(kag, msg,  cb.Invoke, false)));
+
+			if (typeof dialog.defaultFocusItemName != "undefined" && focus != "")
+					dialog.defaultFocusItemName = focus;
+
+			dialog.open();
+
+			invalidate dialog if (useWin);
+		} else {
+			// 既存の処理（文字列で表示）
+			return origAskYesNo(SystemLanguage.getSystemText(,msg,"are you sure?"), caption, yesFunc, noFunc, param, doneFunc);
+		}
+	}
+}
+
+KAGLoadScript("YesNoDialog.tjs");
+
+with (MyYesNoDialog)
+{
+	.currentTextPart = void;
+	// SystemArgumentInfo.curmove.changed();// 菜单变更
+	// ラッパーインスタンス
+	.instance = new MyYesNoDialog(global.askYesNo);
+	// オリジナルをのっとり
+	global.askYesNo = .instance.askYesNo;
+}
+

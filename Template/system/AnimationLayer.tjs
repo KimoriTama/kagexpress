@@ -1,0 +1,376 @@
+// AnimationLayer.tjs - アニメーションを行うレイヤ
+// Copyright (C)2001-2006, W.Dee and contributors  改変?配布は自由です
+
+
+/*
+
+*/
+class AnimationLayer extends AffineLayer,ActionBase
+{
+	var Anim_loadParams = void; // 読み込み時に指定されたパラメータ  读入时指定的参数
+	var Anim_interrupted = false;// 中断中か  是否中断  
+
+	var _isHorizontal = false; // 动画是否是水平排列 
+	var _oriHeight;	// 加载图片后的原高度
+	var _oriWidth;	//加载图片后的原宽度
+	var _currentAnime = 0;
+	var _animeCount = 1;
+
+	property animeCount{
+		getter{return _animeCount;}
+		
+	}
+	property currentAnime{
+		getter{
+			return _currentAnime;
+		}
+		setter(n){
+			n = (int)n;
+			if(n >= animeCount) n = _currentAnime-1;
+			if(n<0)n=0;
+			if(_currentAnime == n )return;
+			_currentAnime = n;
+			if(_isHorizontal){
+				imageLeft = -_oriWidth\animeCount * n;
+			}else{
+				imageTop = -_oriHeight\animeCount * n;
+			}
+		}
+	}
+	function AnimationLayer(win, par)
+	{
+		// AnimationLayer コンストラクタ
+		AffineLayer(...); // スーパークラスのコンストラクタを呼ぶ  调用父类
+
+	}
+
+	function finalize()
+	{
+		clearAnim(); // アニメーション情報のクリア
+		Anim_loadParams = void;
+		global.AffineLayer.finalize(...);
+		global.ActionBase.finalize(...);
+	}
+
+	function clearImage(process = true)
+	{
+		// 表示を不可視(不可視にできれば)にし、  隐藏层并清空图层
+		// レイヤをクリアする
+		// 必要に応じてオーバーライドすること   有必要时覆写
+		if(process)
+		{
+			visible = false;
+			// setSize(32, 32);
+			// setImageSize(32, 32);
+			face = dfAlpha;
+			fillRect(0, 0, imageWidth, imageHeight, 0);
+			type = ltOpaque;
+			face = dfAuto;
+		}
+	}
+	function reset() {
+        stopAction();
+		global.AffineLayer.reset();
+    }
+	function freeImage()//清空图层，只会清除动画信息
+	{
+		// 画像を解放
+		clearAnim();
+		clearImage(); 
+		Anim_loadParams = void;
+	}
+
+	function clearAnim(name)
+	{
+		delAction(name);
+	}
+
+	function addAnime(name,immediate,actionList) // 加载动画信息，并开始动画	TODO 增加一个只添加动画不播放的指令
+	{
+		addAction(...);
+	}
+	//TODO  拆分addAnime 和 start(anim改成anime)	start没有动画的情况下，默认开始循环animeCount动画
+	function startAnim(name,actionList) // 加载动画信息，并开始动画
+	{
+		// elm に従ってアニメーションを開始する
+		global.ActionBase.addAction(name,true,actionList);
+	}
+
+	function stopAnim(name) // 等待停止指定段的动画,当其经过home时会停止
+	{
+		stopAction(name);
+	}
+
+	function canWaitAnimStop(name)//获取指定段的动画能否等待至结束
+	{
+		return isWorkingAction(name) && !isLoopAction(name);
+	}
+
+	/** 
+	* @description: 加载图像，会用参数对图片加以调整，带有动画相关逻辑的核心
+	* @param elm.storage	图像文件
+	* @param elm.key	透明键
+	* @param elm.flipud	是否上下反转
+	* @param elm.fliplr	是否左右反转
+	* @param elm.isHorizontal	对于动画图片是否横向排列
+	* @param elm.animeCount 	动画图片的连续枚数
+	* @param elm.mode=ltAlpha		混合模式
+	* @param elm.visible 是否可见
+	* @param elm.opcaity 透明度
+	* @param elm.pos 预定义的位置
+	* @param elm.index 层级位置
+	* @return 
+	*/
+	function loadImages(elm)  /// 加载图片
+	{
+		// loadImages オーバーライド
+		// elm は読み込み情報
+		if(elm === void)
+		{
+			freeImage();
+			return;
+		}
+
+		Anim_loadParams = %[]; //存储加载参数
+		(Dictionary.assign incontextof Anim_loadParams)(elm);
+			// パラメータを待避
+
+		// 画像を読み込む
+		var taginfo = global.AffineLayer.loadImages(elm.storage, elm.key);
+		// 画像のタグ情報をデフォルト値として採用  获取读取到的图片的信息
+		if(taginfo)
+		{
+			(Dictionary.assign incontextof taginfo)(elm, false);
+			elm = taginfo;
+		}
+		//-----------接下来用这些信息进行对图片的处理-------
+		// フリップ  反转
+		var ud, lr;
+		if(elm.flipud !== void && +elm.flipud)
+		{
+			// 上下反転
+			flipUD();
+			ud = true;
+		}
+		else
+		{
+			ud = false;
+		}
+
+		if(elm.fliplr !== void && +elm.fliplr)
+		{
+			// 左右反転
+			flipLR();
+			lr = true;
+		}
+		else
+		{
+			lr = false;
+		}
+
+		// 大小 剪切 和动画
+		_isHorizontal = + elm.isHorizontal;
+		_oriHeight = imageHeight;
+		_oriWidth = imageWidth;
+		if(isBlank(elm.animeCount) || elm.animeCount <= 1 )
+			elm.animeCount = 1;
+		_animeCount = elm.animeCount;
+		if(elm.clipleft !== void)
+		{
+			// クリッピングが指定されている
+			width = +elm.clipwidth;
+			height = +elm.clipheight;
+			var cl = elm.clipleft;
+			if(lr) cl = (_isHorizontal?imageWidth/animeCount:imageWidth) - cl - width;
+			var ct = elm.cliptop;
+			if(ud) ct = (_isHorizontal?imageHeight:imageHeight/animeCount) - ct - height;
+			imageLeft = -cl;
+			imageTop = -ct;
+		}
+		else
+		{
+			setSizeToImageSize();
+			if(_isHorizontal) width \= animeCount;
+			else height \= animeCount; 
+		}
+		
+		// レイヤモード
+		{
+			var mode = ltAlpha;
+
+			if(elm.mode !== void)
+			{
+				var layertypeinfo = imageTagLayerType[elm.mode];
+				if(layertypeinfo !== void)
+					mode = layertypeinfo.type;
+			}
+
+			type = mode;
+		}
+
+		// 色補正
+		face = dfAuto;
+		applyColorCorrection(this, elm);  //色调补正
+
+		// 可視不可視、位置、不透明度、インデックス   
+		if ( elm !== void && elm.pos !== void ) {
+			// ポジションに従って位置を決定
+			left= window.scPositionX[elm.pos] - width \ 2;
+			top = window.scHeight - height;
+		}
+		else
+		{
+			if(elm.left !== void) left = +elm.left;
+			if(elm.top !== void) top = +elm.top;
+		}
+		if(elm.visible !== void) visible = +elm.visible;
+		if(elm.opacity !== void) opacity = +elm.opacity;
+		absolute = +elm.index if elm.index !== void;
+	}
+
+
+	function applyColorCorrection(layer, param)//颜色修正
+	{
+		// layer に対して色補正を行う
+		var orgface = layer.face;
+		var orgholdlpha = layer.holdAlpha;
+		layer.face = dfAuto;
+		if(param.grayscale !== void && +param.grayscale) layer.doGrayScale();
+		layer.adjustGamma(
+			param.rgamma, param.rfloor, param.rceil,
+			param.ggamma, param.gfloor, param.gceil,
+			param.bgamma, param.bfloor, param.bceil);
+		if(param.mcolor !== void)
+		{
+			// 色重ね合わせ
+			layer.face = dfOpaque;
+			layer.holdAlpha = true;
+			layer.colorRect(0, 0, layer.imageWidth, layer.imageHeight, +param.mcolor,
+				+param.mopacity);
+		}
+		layer.face = orgface;
+		layer.holdAlpha = orgholdlpha;
+	}
+
+	property interrupted		//TODO 以后考虑做
+	{
+		// すべてのセグメントに interrupted を設定する
+		getter() { return false; }
+		setter(x)
+		{
+		}
+	}
+
+	function assign(src)	
+	{
+		// レイヤの情報をコピー
+		// ただし 位置、透明度、サイズ、レイヤ内画像位置はコピーしない
+		// (コピーしたい場合は KAGLayer.assignVisibleState を呼ぶこと)
+		global.AffineLayer.assignImages(src);
+		setSize(src.width,src.height);
+		global.ActionBase.restore((global.ActionBase.store incontextof src)());//TODO 目前在进行渐变时的动画不能做到完全的同步，不支持非循环动画，循环动画也会可能会产生切换后的偏差
+
+		// 画像読み込み情報のコピー   复制图像读入信息
+		if(src.Anim_loadParams !== void)
+		{
+			Anim_loadParams = %[];
+			(Dictionary.assign incontextof Anim_loadParams)(src.Anim_loadParams);
+		}
+		else
+		{
+			Anim_loadParams = void;
+		}
+
+		// その他  其他信息复制
+		Anim_interrupted = src.Anim_interrupted;
+		_animeCount = src._animeCount;
+		_currentAnime = src._currentAnime;
+		_isHorizontal= src._isHorizontal; // 动画是否是水平排列 
+		_oriHeight= src._oriHeight;
+		_oriWidth= src._oriWidth;
+	}
+
+	function store()
+	{
+		// 情報を辞書配列に記録
+		var dic = global.AffineLayer.store();	
+		dic.actionInfo = global.ActionBase.store();
+		// 読み込みパラメータ
+		if(Anim_loadParams !== void)
+		{
+			dic.loadParams = %[];
+			(Dictionary.assign incontextof dic.loadParams)(Anim_loadParams);
+		}
+		else
+		{
+			dic.loadParams = void;
+		}
+
+		return dic;
+	}
+
+	function restore(dic)
+	{
+		// dic から情報を読み出す
+		loadImages(dic.loadParams);
+		global.AffineLayer.restore(dic);	
+		global.ActionBase.restore(dic.actionInfo);	
+	}
+}
+
+
+
+class ClickGlyphLayer extends AnimationLayer
+{
+	// クリック待ち記号レイヤ
+	var loadedImage; // 現在読み込まれている画像
+	var loadedKey; // 現在読み込まれているキー
+
+	function ClickGlyphLayer(win, par)
+	{
+		// コンストラクタ
+		super.AnimationLayer(win, par);
+		hitType = htMask;
+		hitThreshold = 256; // マウスメッセージは完全に透過
+	}
+
+	function finalize()
+	{
+		// finalize()
+		super.finalize(...);
+	}
+
+	function loadImages(storage, key,animeCount,isHorizontal)
+	{
+		// loadImage オーバーライド
+		if(loadedImage !== storage || loadedKey !== key)
+		{
+			super.loadImages(%[storage : storage, key : key,animeCount:animeCount,isHorizontal:isHorizontal]);
+			loadedImage = storage;
+			loadedKey = key;
+		}
+		if(!isWorkingAction("default"))
+		addAnime("default",true,[%[currentAnime:%[handler:MoveAction,value:animeCount-1,time:animeCount*100]],%[currentAnime:%[handler:MoveAction,value:0,time:animeCount*100]],%[loop:true,point:2]]);
+	}
+
+	property visible
+	{
+		// visible オーバーライド
+		getter()
+		{
+			return super.visible;
+		}
+		setter(x)
+		{
+			super.visible = x;
+			// 非表示の時は動作を停止しているように
+			if(x)
+				interrupted = false;
+			else
+				interrupted = true;
+		}
+	}
+}
+
+
+

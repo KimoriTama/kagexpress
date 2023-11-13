@@ -1,0 +1,470 @@
+// Initialize.tjs - システムの初期化
+// Copyright (C)2001-2006, W.Dee and contributors  改変・配布は自由です
+
+// システムバージョン
+var kagVersion = "kagExpress-beta1";
+//-------------------------------------------------debug 相关设置-----------------------------------------------------------
+/*
+	Debug.message へのショートカット
+*/
+function getDebugString(obj){
+	if(obj === void)
+		return "void";
+	if(null === obj)
+		return "null";
+	if(obj instanceof "String"){
+		 return "\""+obj+"\"";
+	}else if( obj instanceof "Array"){
+		var str="[ ";
+		for(var i=0;i<obj.count;i++){
+			str+=getDebugString(obj[i]);
+			if(i!=obj.count-1)str+=",";
+		}
+		str+=" ]";
+		return str;
+	}
+	else if( obj instanceof "Dictionary"){
+		var str=["{"];
+		foreach (obj, function(k, v, dic,param) {
+			 param.add(" "+k+" : " + getDebugString(v)+",");
+		},str);
+		str.add("}");
+		return str.join("\n");
+	}
+	else {
+		return (string)obj;
+	}
+}
+//我的debug加强方法
+function dm(obj){
+	Debug.message(getDebugString(obj));
+}
+global.debug = dm;
+
+property debugEnabled { getter() { return System.getArgument("-debug") != "no"; } };
+("property inXP3archivePacked { getter() { return " + (function {
+	var path = getPlacedPath("startup.tjs"), r = false;
+	if (path.indexOf(">") < 0) try { r = (getLocalName(path) != ""); } catch {}
+	return !r;
+} incontextof Storages)() + "; } }")!;
+Scripts.exec(@"@set (PACKED=${inXP3archivePacked})");
+
+//全局的异常捕获器
+if (!debugEnabled) {
+	// release版本处理
+	System.exceptionHandler = function (e) {
+		Debug.logAsError(); // 开始写出日志文件
+		System.eventDisabled = true;
+		try { if (typeof global.onSystemExceptionHandlerHook == "Object" &&
+				  /**/   global.onSystemExceptionHandlerHook(e)) return true; } catch {}
+		System.inform(e.message);
+		System.terminate();
+		return true;
+	};
+	// 移除 debug工具
+	var dummy = %[];
+	&Debug.console    = dummy;
+	&Debug.controller = dummy;
+} else {
+	// debug 时的处理
+	System.exceptionHandler = function (e) {
+		// 最终的异常捕获器 e 为异常对象
+		if (e instanceof "ConductorException") {
+			// 指令异常的情况下
+			Debug.logAsError(); // 开始写出日志文件
+			var event_disabled = System.eventDisabled;
+			System.eventDisabled = true;
+			// 暂时停止事件触发
+			try { if (typeof global.onSystemExceptionHandlerHook == "Object" &&
+					  /**/   global.onSystemExceptionHandlerHook(e)) return true; } catch {}
+			System.inform(e.message);
+			// 恢复事件触发
+			System.eventDisabled = event_disabled;
+			return true; // 返回 true代表异常已处理 
+		}
+
+		if (typeof Debug.console == "Object") {
+			Debug.console.visible = true;
+			Debug.notice(e.trace);
+			System.inform(e.message);
+		}
+		return false; // 返回 false 说明移除未处理 
+	};
+	// 设置预处理
+	Scripts.exec("@set (DEBUG=1)");
+};
+
+//--------------------------------------------------文件搜索路径设置------------------------------------
+/*
+	自动搜索路径设置	
+	在后指定的路径要优先于前指定的
+*/
+var archive_exists = %[]; // アーカイブが存在するかキャッシュ
+function useArchiveIfExists(name)
+{
+	// name 正规化
+	with (Storages) name = .chopStorageExt(.extractStorageName(name));
+	// 存在相同名称 name 的xp3包则使用 
+	var arcname = System.exePath + name + ".xp3";
+	if(Storages.isExistentStorage(arcname)) {
+		archive_exists[name.toLowerCase()] = true;
+		Storages.addAutoPath(arcname + ">");
+	}
+}
+//同时设置文件夹和XP3包
+function addArchive(name)
+{
+	// 検索パスを設定しつつ，name.xp3 が存在していたらそのアーカイブを使う
+	Storages.addAutoPath(name + "/");
+	useArchiveIfExists(name);
+}
+
+// 搜索子文件夹
+function addArchiveWithSubFolder(name, arr*)
+{
+	var arcname = System.exePath + name + ".xp3";
+	var isexist = archive_exists[name.toLowerCase()];
+	for (var i = 0; i < arr.count; i++) {
+		var sub = arr[i];
+		if (sub == "") continue;
+		Storages.addAutoPath(name    + "/" + sub + "/");
+		Storages.addAutoPath(arcname + ">" + sub + "/") if (isexist);
+	}
+}
+
+// 注册子文件夹
+function setupSubFolders(list) {
+	var binds = %[], names = [];
+	for (var path, i = 0; i < list.count; i++) {
+		if ((path = list[i]) == "") continue;
+		var div = path.split("/");
+		var name = div[0];
+		if (name == "" || div.count <= 1) continue;
+		div.erase(0);
+		if (binds[name] === void) {
+			binds[name] = [];
+			names.add(name);
+		}
+		binds[name].add(div.join("/",,true));
+	}
+	for (var i = 0; i < names.count; i++) {
+		addArchiveWithSubFolder(names[i], binds[names[i]]*);
+	}
+}
+
+
+
+Storages.addAutoPath(System.exePath + "video/");  // 视频文件 可能会分开存放
+{
+	// 注册data以下的子文件夹
+	// 如果存在同名的xp3包 则优先使用
+	var subfolders = [
+		"k2compat", // for krkrz
+		"test", // for krkrz
+		"video",    // video 文件夹
+		"others",   // 其他
+		"rule",     // rule图像文件夹
+		"sound",    // 效果音文件夹
+		"bgm",      // BGM 文件夹
+		"fgimage",  // 前景画像文件夹
+		"bgimage",  // 背景画像文件夹
+		"scenario", // 剧本文件夹
+		"image",    // 其他图像文件夹
+		"system",   // 系统文件夹
+		"voice",    // 语音文件夹
+		"face",     // 面部图像
+		"init",     // 初期化用フォルダ
+		"sysscn",   // 系统展示ui用脚本
+		"sysse",    // 系统效果音
+		"main",     // 系统tjs
+		"evimage",  // 事件图像
+		"thum",     // 缩略图
+		"uipsd",    // ui用部件图像
+		"motion",   // motion数据
+		"emote"     // Emote 数据
+		];
+	for (var i = 0; i < subfolders.count; i++) {
+		var name = subfolders[i];
+		addArchive(name) if (name != "");
+	}
+}
+
+// 存在自定义文件夹则执行搜索自定义文件夹
+if(Storages.isExistentStorage("Storages.tjs"))
+	Scripts.execStorage("Storages.tjs");
+
+useArchiveIfExists("patch.xp3");
+
+// 搜索追加的补丁
+for(var i = 2; ; i++)
+{
+	// パッチ用アーカイブ patch2.xp3, patch3.xp3 ... がある場合はそちらを
+	// 優先して読み込むように
+	if(Storages.isExistentStorage(System.exePath + "patch" + i + ".xp3"))
+		Storages.addAutoPath(System.exePath + "patch" + i + ".xp3>");
+	else
+		break;
+}
+
+delete useArchiveIfExists; // useArchiveIfExists 用完之后删除
+
+//---------------------------------------------系统启动准备---------------------------------------------------------
+/*
+	系统版本
+*/
+Debug.notice("OS : " + System.osName + " (" + System.platformName + ")");
+Debug.notice("KAG : " + kagVersion);
+Debug.notice("Kirikiri : " + System.versionString);
+
+/*
+	( デバッグ ) 時間計測	debug事件测量
+*/
+
+var parseStartTick = System.getTickCount();
+
+
+/*
+	スクリプト読み込みラッパー		脚本读入debug
+*/
+
+function KAGLoadScript(name)
+{
+	var start = System.getTickCount();
+	Scripts.execStorage(name);
+	dm("reading " + name + " ，consuming time:(" + (System.getTickCount() - start) + "ms)");
+}
+
+var loaded_scripts = %[];
+
+function KAGLoadScriptOnce(name)
+{
+	// 指定したスクリプトを読み込むが、一回しか読み込まない
+	if(global.loaded_scripts[name] === true) return; // 既に読み込んでいる		已经读过了
+	global.KAGLoadScript(name);
+	global.loaded_scripts[name] = true;
+}
+
+function CanLoadPlugin(name) {
+	var exepath = System.exePath, exist = Storages.isExistentStorage;
+	if (exist(exepath+name) || exist(exepath+"plugin/"+name) || exist(exepath+"system/"+name)) return true;
+	var placed = Storages.getPlacedPath(name);
+	return placed != "" && exist(placed);
+}
+function KAGConfigEnabled(name, dflt) {
+	// global変数参照
+	return (typeof global[name] == "undefined") ? dflt : global[name];
+}
+
+
+/*
+	AppConfig.tjs 読み込み
+*/
+if(Storages.isExistentStorage("AppConfig.tjs"))
+{
+	KAGLoadScript("AppConfig.tjs");
+}
+/*
+	Config.tjs 読み込み		读入设置
+*/
+if(Storages.isExistentStorage("Config.tjs"))
+{
+	KAGLoadScript("Config.tjs");
+}
+else
+{
+	throw new Exception("cann't find Config.tjs。");
+}
+
+/*
+	Config.tjs バージョンチェック		设置更新文件
+*/
+
+if(typeof global.config_version == "undefined" || config_version != kagVersion)
+{
+	KAGLoadScript("UpdateConfig.tjs");
+}
+
+//	涉及系统使用 预先需要加载的插件(config 会涉及控制的变量，所以要放在后面)
+try {
+	var dllList = ["PackinOne.dll","KAGParserEx.dll","menu.dll","win32dialog.dll"];
+	for(var i=0;i<dllList.count;i++){
+		Plugins.link(dllList[i]) if (CanLoadPlugin(dllList[i]));
+	}
+	Plugins.link("wuvorbis.dll") if (CanLoadPlugin("wuvorbis.dll")) && KAGConfigEnabled("wuVorbisEnabled",true);
+	Plugins.link("wuopus.dll") if (CanLoadPlugin("wuopus.dll")) && KAGConfigEnabled("wuOpusEnabled",false);
+} catch(e) {dm(e);}
+
+
+/*
+	二重启动的检查
+*/
+if(!System.createAppLock(System.appLockKey=(System.exePath).replace(/[^A-Za-z0-9]/g, '_')))
+{
+	/*	//如果需要去掉packinOne的情况下
+	System.inform(System.title + "has already been boot。");
+	System.exit();
+	*/
+	// 已经启动了
+	var info = System.title + "has already been boot.";
+	if (System.getArgument("-restartboot") == "block" && typeof System.waitForAppLock == "Object") {
+		// 再起動オプションがある場合はブロックを行う
+		var timeout = int(+System.getArgument("-restarttimeout")), key = System.appLockKey;
+		if (timeout <= 0) timeout = 3000;
+		var result = System.waitForAppLock(key, timeout);
+		info = result ? void : (System.title + "restart has been failed");
+	} 
+	if (info !== void) {
+		System.inform(info) if (info != "");
+		return System.exit();
+	}
+}
+
+
+/*
+	オン・デマンド・ローディングを行うための定義
+*/
+
+
+property askYesNo { getter() { KAGLoadScript("YesNoDialog.tjs"); return global.askYesNo; } }
+property CheckBoxLayer { getter() { KAGLoadScript("CheckBoxLayer.tjs"); return global.CheckBoxLayer; } }
+//property ButtonLayer { getter() { KAGLoadScript("ButtonLayer.tjs"); return global.ButtonLayer; } }
+property EditLayer { getter() { KAGLoadScript("EditLayer.tjs"); return global.EditLayer; } }
+property SliderLayer { getter() { KAGLoadScript("SliderLayer.tjs"); return global.SliderLayer; } }
+property KAGPlugin { getter() { KAGLoadScript("Plugin.tjs"); return global.KAGPlugin; } }
+property execDialog { getter() { KAGLoadScript("ExecDialog.tjs"); return global.execDialog; } }
+property uiload { getter() { KAGLoadScript("UILoader.tjs"); return global.uiload; } }
+property LogWindow { getter() { 		//TODO 看一下logWindow
+	Scripts.exec(@"@set (LOGWINDOW_ENABLE_WIN32DIALOG=1)") if (CanLoadPlugin("win32dialog.dll") && Storages.isExistentStorage("win32dialog.tjs"));
+	KAGLoadScript("LogWindow.tjs");
+	return global.LogWindow;
+} }
+
+
+
+/*
+	各システム読み込み		正式开始读入系统
+*/
+dm("KAG System is loading...");
+{
+	@set (K2COMPAT_PURGE_FONTSELECT=1)
+	@set (K2COMPAT_PURGE_KAGPARSER=1)		//直接使用 KAGParserEx 不用旧的
+	// Scripts.exec("@set (K2COMPAT_VERBOSE=1)") if (debugEnabled);
+	Scripts.execStorage("k2compat.tjs");
+	Krkr2CompatUtils.scriptBase = "";
+}
+
+if(Storages.isExistentStorage("Override.tjs"))
+	KAGLoadScript("Override.tjs");
+// add by GoWatanabe
+KAGLoadScript("LayerEx.tjs");
+
+KAGLoadScript("Utils.tjs");
+KAGLoadScript("KAGLayer.tjs");
+KAGLoadScript("ButtonLayer.tjs");
+KAGLoadScript("SelectLayer.tjs");
+KAGLoadScript("MapSelectLayer.tjs");
+KAGLoadScript("TextRender.tjs");
+KAGLoadScript("BGM.tjs");
+KAGLoadScript("SE.tjs");
+KAGLoadScript("Voice.tjs");
+KAGLoadScript("LoopVoice.tjs");
+KAGLoadScript("Movie.tjs");
+KAGLoadScript("Conductor.tjs");
+// add by GoWatanabe
+// AnimationLayer の下層に AffineLayer/ActionLayer を仕込む
+KAGLoadScript("AffineLayer.tjs");
+KAGLoadScript("Action.tjs");
+KAGLoadScript("AnimationLayer.tjs");
+// KAGLoadScript("ActionLayer.tjs");
+
+KAGLoadScript("system.tjs");
+KAGLoadScript("GraphicLayer.tjs");
+KAGLoadScript("DialogLayer.tjs");
+KAGLoadScript("MyYesNoDialog.tjs");
+KAGLoadScript("Quickmenu.tjs");
+KAGLoadScript("HisViewLayer.tjs");
+KAGLoadScript("MessageLayer.tjs");
+KAGLoadScript("HistoryLayer.tjs");
+KAGLoadScript("MainWindow.tjs");
+
+KAGLoadScript("debugutil.tjs") if debugEnabled;
+KAGLoadScript("Menus.tjs");
+//----------scn处的脚本放这里-------
+// KAGLoadScript("saveload.tjs");
+// KAGLoadScript("name.tjs"); // 名前入力・変更用
+// KAGLoadScript("encyclopedia.tjs"); // 百科事典用
+// ゲームタイトル依存スクリプト		游戏标题依赖脚本
+KAGLoadScript("helptextman.tjs");
+KAGLoadScript("FloatLayer.tjs");
+KAGLoadScript("exmenuintf.tjs");
+KAGLoadScript("pagebase.tjs");
+KAGLoadScript("saveload.tjs");
+KAGLoadScript("default.tjs");
+KAGLoadScript("option.tjs");
+KAGLoadScript("custom.tjs");
+
+
+/*
+	( デバッグ ) 時間計測
+*/
+dm("the scripts loading consume " + (System.getTickCount() - parseStartTick) + "ms ");
+parseStartTick = System.getTickCount();
+
+
+/*
+	( デバッグ ) 時間計測
+*/
+
+parseStartTick = System.getTickCount();
+
+
+/*
+	KAG メインウィンドウの作成
+	グローバルメンバ kag が存在しなければ KAGWindow クラスの
+	オブジェクトを作成して入れる
+*/
+
+global.kag = new KAGWindow() if typeof global.kag == "undefined";
+
+
+/*
+	グローバルから簡単にアクセスできるように、いくつかの
+	変数の別名を作成
+*/
+
+var f = kag.flags;   // ユーザ変数 (フラグ)
+var sf = kag.sflags; // システム変数 (システム)
+var tf = kag.tflags; // 一時変数 (一時フラグ)
+
+property mp
+{
+	getter { return kag.conductor.macroParams; }
+}
+
+/*
+	( デバッグ ) 時間計測
+*/
+dm("the consutrut of KAGMainWindow consume " + (System.getTickCount() - parseStartTick) + "ms ");
+delete parseStartTick;
+
+//-------------------------------------------系统启动之后的其他设置-----------------------------------------------------------
+
+/*
+	AfterInit.tjs が存在すれば実行
+*/
+if(Storages.isExistentStorage("AfterInit.tjs"))
+	KAGLoadScript("AfterInit.tjs");
+
+/*
+	コマンドラインパラメータとして -ovr が指定されていれば
+	そのパラメータを TJS 式として実行
+*/
+{
+	var ovr = System.getArgument('-ovr');
+	if(ovr !== void && ovr != 'yes') Scripts.eval(ovr);
+}
+/*
+	func.ks の実行
+*/
+if(debugEnabled){Debug.console.visible=1;}
+kag.process("func.ks");

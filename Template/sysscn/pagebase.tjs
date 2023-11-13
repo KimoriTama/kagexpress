@@ -1,0 +1,150 @@
+
+// ----------------------------------------------------------------------------
+// レイヤ名を決めうちしたページ表示
+/*
+ ページ番号表示用レイヤ名 : page
+ ページ直移動ボタンレイヤ : pageN (N=0-...)
+ ページ移動レイヤ名       : prev,next
+ アイテム表示用レイヤ名   : itemN (N=0-...)
+ */
+class PageSheet extends DialogAction
+{
+	var _col = 1, _row =1,_xOffset = 0,_yOffset = 0;
+	var _page = 0, _max = 10, _ring = false;	//_page 的范围是 0 到 _max-1
+	var _itemList = %[];	// 用于存储每个项目，为数字-子项目的字典，每个子项目是（部件名-层对象）的字典
+	var template = ["item"];	// 用于复制的模板按钮
+	property per {		// 每页多少格
+		getter{return _col * _row; }
+	}
+	property ring   { getter() { return _ring; } setter(ring) { _ring = ring; }  } 	// ページ番号がリング状に周回するか (falseなら最大or最小で打ち止め）
+	property offset { getter() { return per*_page; } }		// 当前的偏移量	 还是别用这种了
+	property page {
+		getter()  { return _page; }
+		setter(v) {
+			if (     v <     0) v = _ring ? _max-1 : 0;
+			else if (v >= _max) v = _ring ?      0 : _max-1;
+			if (_page !== v) {
+				onPageChange(_page, v);
+				_page <-> v;
+				onPageChanged(v, _page);
+			}
+		}
+	}
+
+	function PageSheet(elm = %[]) {
+		_col =elm.col if(!isBlank(elm.col));
+		_row =elm.row if(!isBlank(elm.row));
+		_xOffset =elm.xoffset if(!isBlank(elm.xoffset));
+		_yOffset =elm.yoffset if(!isBlank(elm.yoffset));
+		_max =elm.max if(!isBlank(elm.max));
+		_ring =elm.ring if(!isBlank(elm.ring));
+		
+		kag.addHook("keyDown",onKeyDown);
+	}
+	function finalize()  {
+		// キーフックを解除
+		if(isBlank(global,"kag") || isBlank(this))return;
+		kag.removeHook("keyDown",onKeyDown);
+	}
+
+	/** 
+	* @description: 	更新换页按钮，页数按钮
+	* @return 
+	*/	
+	function updateButton() {
+		var names = owner.names;
+		var scut = names["page" + this.page];
+		updatePageShortcut(scut)  if (scut !== void);
+		scut.toggle = true if (scut !== void);
+
+		with (owner.names) {
+			.prev.enabled = (page > 0 || _ring) if (.prev !== void);
+			.prev.visible = (_max > 1) if (.prev !== void);
+			.next.enabled = (page < _max-1 || _ring) if (.next !== void);
+			.next.visible = (_max > 1) if (.next !== void);
+		}
+	}
+
+	function updateItem(){	// 数据编号是先从上到下，再从左到右增加
+		if(isBlank(_itemList)){
+			for(var i=0;i<_col;i++){
+				for(var j=0;j<_row;j++){
+					var num = _row * i + j;
+					var links = %[];
+					for(var z=0 ;z < template.count ; z++){
+						var itemName = template[z];
+						var newName = itemName +(string)num;
+						if(isBlank(owner.names[itemName]))continue;
+						var base = owner.names[itemName];
+						var basex = base.left,basey = base.top; 
+						
+						owner.copyLink(itemName,newName);
+						var lay = owner.names[newName];
+						lay.setPos(basex + i *_xOffset  ,basey + j * _yOffset);
+						lay.number = num;
+						drawItem(itemName,num,lay);
+						links[itemName] = lay;
+					}
+					_itemList[num] = links;
+				}
+			}
+		}
+		else for(var i=0;i<_col;i++){
+			for(var j=0;j<_row;j++){
+				var num = _row * i + j;
+				foreach(_itemList[num],function(k,v,dic,num){
+					drawItem(k,num,v);
+				} incontextof this,num);
+			}
+		}
+	}
+	function update() {
+		updateButton();
+		updateItem();
+	}
+	/** abstract
+	* @description:  绘制num号的项目
+	* @param name	控件名
+	* @param num	编号
+  	* @param lay	层
+	* @return void
+	*/	
+	function drawItem(name,num,lay){}
+
+	var _lastItem = void;
+	// 最後に選択したボタンをフォーカス
+	property lastItem {
+		getter()  { return _lastItem; }
+		setter(v) { _lastItem = v if (typeof v === "String"); }
+	}
+	function nextPage() {
+		page++;
+		_lastItem = "next";
+	}
+	function prevPage() {
+		page--;
+		_lastItem = "prev";
+	}
+
+	// ページを切り替えたら _lastItem は無効
+	function onPageChange(now,  next) {
+		_lastItem = void;
+	}
+	function onPageChanged(prev, now)  {
+		update();
+	}		// ページ変更後に呼ばれる
+	function onUiload(){
+	}
+	function onUiloaded(){
+		update();
+	}
+
+	function onKeyDown(key, shift) {
+		if (!isvalid this || isBlank(owner)) return;
+		if ((shift & ssShiftCtrlAlt) == 0)switch (key) {
+			case VK_PRIOR: page--; break;
+			case VK_NEXT:  page++; break;
+		}
+		return;
+	}
+}

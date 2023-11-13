@@ -1,0 +1,335 @@
+// ボイス情報を管理するためのクラス
+
+// 口パクアニメパターン用切り替え時間(最短の場合)
+var lipFlipTime = 100;
+
+// サウンドバッファ用特殊判定処理
+if (typeof WaveSoundBuffer.setDefaultAheads == "undefined") {
+	WaveSoundBuffer.enableGetSample = false;
+	var plug = "getSample.dll";
+	if (CanLoadPlugin(plug)) try {
+		Plugins.link (plug);
+		// サンプル先行取得の値（口パクズレ軽減用）
+		WaveSoundBuffer.setDefaultAheads((int)(200 * 44.1));
+		WaveSoundBuffer.enableGetSample = true;
+	} catch (e) {
+		System.inform(@"failed to link getSample.dll :${e.message}");
+	}
+}
+
+/**
+ * ボイス再生用トラック
+ */
+class VoiceSoundBuffer extends WaveSoundBuffer
+{
+	var LIPLEVEL1 = 0.01;
+	var LIPLEVEL2 = 0.2;
+	var owner;
+	var id;
+	var name; // キャラ名
+	var type; // ボイス種別 0:通常 1:bgv 2:bgv2
+	var loop; // ループさせるかどうか
+	var mode; // true 时会触发 voice的label事件
+	var vmode; // true なら口ぱく用のラベル処理を行う
+	var vocoder; // 音声速度変更用
+	var storage; // 現在再生中のファイル
+
+	var labelCount; // ラベルカウンタ
+	var prevstatus; // 直前のステータス
+	var startTime;  // 再生開始時刻
+
+	var flipTimer;
+	var lipLevel1; // 口ぱく閾値1
+	var lipLevel2; // 口ぱく閾値2
+	
+	function VoiceSoundBuffer(owner, id) {
+		super.WaveSoundBuffer(owner);
+		this.owner = owner;
+		this.id = id;
+		prevstatus = status; //"unload";
+		labelCount = 0;
+		flipTimer = new Timer(onFlip, '');
+		flipTimer.interval = lipFlipTime;
+		vocoder = new global.WaveSoundBuffer.PhaseVocoder();
+		vocoder.window = 256;
+
+		var empty = function {};
+		if (typeof owner.   addVoiceGain != "Object") this.  setGain = empty;
+		if (typeof owner.removeVoiceGain != "Object") this.resetGain = empty;
+	}
+
+	function finalize() {
+		owner = void;
+		stop();
+		filters.clear();
+		invalidate vocoder;
+		super.finalize();
+	}
+
+	function   setGain { owner.   addVoiceGain(...); }
+	function resetGain { owner.removeVoiceGain(...); }
+	
+	/**
+	 * ボイスを待てるかどうか
+	 */
+	function canWait() {
+		return status == "play";
+	}
+
+	/**
+	 * ボイスのモードをクリアする。
+	 * ※delayrun 関係の反応が止まる
+	 */
+	function clearMode(all) {
+		if (all || type == 0) {
+			mode = false;
+		}
+	}
+
+	/**
+	 * ボリューム調整
+	 */
+	function resetVolume() {
+		if (name != "") {
+			volume2 = owner.getChVoiceVolume(name, type);	//todo 自己实现
+		}
+	}
+
+	// 再生スピード指定
+	var speedChanging = false;
+	var _speed = 1.0;
+	property speed {
+		getter() {
+			return _speed;
+		}
+		setter(v) {
+			if (v != _speed) {
+				speedChanging = true;
+				var pos;
+				if (status == "play") {
+					pos = position;
+					super.stop();
+					dm(@"ボイス一時停止:${pos}:${totalTime}");
+				}
+				filters.remove(vocoder);
+				if (v != 1.0) {
+					filters.add(vocoder);
+					vocoder.time = 1.0 / v;
+				}
+				setGain(storage, name);
+				try {
+					if (pos !== void) {
+						super.open(storage);
+						position = pos;
+						super.play();
+						dm(@"ボイス復帰:${pos}:${position}");
+					}
+				} catch(e) {
+					resetGain(storage);
+					if (!onErrorVoice(storage + ":音声のリプレイに失敗しました : "+e.message)) return;
+					throw e;
+				}
+				resetGain(storage);
+				_speed = v;
+				speedChanging = false;
+				_onStatusChanged(); // 処理中に発生してなかったイベントを発生させる
+			}
+		}
+	}
+	
+	// -------------------------------------------------------
+	// イベント処理部
+	// -------------------------------------------------------
+
+	// ステータス変更時
+	function _onStatusChanged() {
+		var ps = prevstatus;
+		var cs = prevstatus = status;
+		//dm(@"ボイスステート変更:${name}:${ps}→${cs}");
+		if (ps == cs)return;
+		if (cs == "play") {
+			// 再生開始時処理
+			if (id !== void) {
+				owner.onVoiceStart(id, type, loop);
+				if (mode) {
+					owner.onVoiceLabelStart(this);
+				}
+			}
+			labelCount = 0;
+			startTime = System.getTickCount();
+		} else if (ps == "play" && cs == "stop") {
+			// 停止時処理
+				// if (typeof filters != "undefined") {
+					// filters.clear();
+				// }
+			if (id !== void) {
+				if (mode) {
+					owner.onVoiceLabelStop();
+				}
+				owner.onVoiceStop(id, type, loop);
+			}
+		}
+		
+	}
+
+	function onStatusChanged() {
+		super.onStatusChanged(...);
+		// スピード変更中はスルーする
+		if (!speedChanging && owner !== void) {
+			_onStatusChanged();
+		}
+	}
+	
+	// ラベル通過時
+	function onLabel(label) {
+		if (mode && id !== void) {
+			owner.onVoiceLabel(label, ++labelCount);
+		}
+	}
+
+	// フェード完了時
+	function onFadeCompleted() {
+		if (volume == 0) {
+			super.stop();
+			flipTimer.enabled = false;
+		}
+	}
+
+	// エラー発生時
+	function onErrorVoice { return (typeof owner.onErrorVoice == "Object") ?
+		/**/                               owner.onErrorVoice(...) : void; }
+	
+	// -------------------------------------------------------
+	// コマンド制御部
+	// -------------------------------------------------------
+
+	function open(storage) {
+		this.storage = storage;
+		super.open(...);
+	}
+
+	function fade(fade=100, time=0) {
+		if (time == 0) {
+			super.stopFade();
+			volume = fade * 1000;
+		} else {
+			super.fade(fade*1000,time);
+		}
+	}
+	
+	/**
+	 * 再生処理下請け
+	 * @param storage
+	 * @param fadetime フェードイン時間指定
+	 */
+	function _start(storage, fadetime=0, fadevalue=100) {
+		open(storage);
+		looping = loop;
+		if (type == 2) {
+			// hvoice用特殊処理
+			// ラベルがある場合はランダムで開始場所を変える
+			var names = [];
+			names.assign(labels);
+			if (names.count > 0) {
+				var n = intrandom(names.count\2);
+				//dm("ランダム基準:" + n);
+				if (n > 0) {
+					var label = names[(n-1)*2+1];
+					//dm("hvoice", label.position, label.samplePosition);
+					samplePosition = label.samplePosition if (typeof label == "Object" && label);
+				}
+			}
+		}
+		// フェード処理
+		if (fadetime > 0) {
+			volume = 0;
+			play();
+			super.fade(fadevalue*1000, fadetime);
+		} else {
+			volume = fadevalue*1000;
+			play();
+		}
+		flipTimer.enabled = true;
+	}
+	
+	/**
+	 * ボイスの再生
+	 * @param name 再生者名
+	 * @param storage ファイル名
+	 * @param pan ボイスパン指定
+	 * @param type 種別
+	 * @param mode ラベル処理モード
+	 * @param noflip フリップさせない
+	 * @param fadetime フェード時間
+	 * @param fadevalue フェード値
+	 * @return 再生時間
+	 */
+	function start(name, storage, pan=0, type=0, loop=false, mode=0, noflip=true, fadetime=0, fadevalue=100) {
+		super.stop();
+		super.stopFade();
+		this.name = name;
+		this.type = type;
+		this.loop = loop;
+		this.mode = mode;
+		this.pan = pan * 1000;
+		var level = owner.getCharacterVoiceLevel(name); // todo 自己写个
+		if (level !== void) {
+			lipLevel1 = Math.pow(level[0]/100.0,2);
+			lipLevel2 = Math.pow(level[1]/100.0,2);
+		} else {
+			lipLevel1 = LIPLEVEL1;
+			lipLevel2 = LIPLEVEL2;
+		}
+		// 再生時にラベル処理をするかどうかとあわせて指定するが、
+		// 行進行時にクリアの対象にはならない(口ぱくは次行にすすんでも継続する)
+		this.vmode = !noflip;
+		if (storage != ""){
+			resetVolume();
+			setGain(storage, name);
+			try {
+				_start(storage, fadetime, fadevalue);
+			} catch (e) {
+				resetGain(storage);
+				if (!onErrorVoice(storage + ":the voice storage cann't open: "+e.message)) return;
+				throw e;
+			}
+			resetGain(storage);
+		}
+    }
+
+	/**
+	 * ボイスの停止
+	 */
+	function stop(fadetime=0) {
+		name = void;
+		if (fadetime > 0) {
+			super.fade(0, fadetime);
+		} else {
+			super.stop();
+			flipTimer.enabled = false;
+		}
+    }
+	
+	// 口ぱく用データ処理
+	function onFlip() {
+		var voiceLevel;
+		// 口ぱくは mode がクリアされても止めない
+		if (status == "play" && vmode && id !== void) {
+			var voiceLevel;
+			if (global.WaveSoundBuffer.enableGetSample) {
+				var a = sampleValue;
+				if (a > lipLevel2) {
+					voiceLevel = 2;
+				} else if (a > lipLevel1) {
+					voiceLevel = 1;
+				} else {
+					voiceLevel = 0;
+				}
+			} else {
+				voiceLevel = (int)(Math.random() * 3);
+			}
+			//dm(@"ボイス値${position}:${voiceLevel}");
+			owner.onVoiceFlip(id, voiceLevel);
+		}
+	}
+};

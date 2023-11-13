@@ -1,0 +1,30 @@
+# 快捷菜单提示设置
+save
+	help_save
+load
+	help_load
+qsave
+	help_qsave
+hold
+	help_hold
+qload
+	help_qload
+option
+	help_option
+prev
+	help_prev
+back
+	help_back
+backlog
+	help_log
+auto
+	help_auto
+skip
+	help_skip
+next
+	help_next
+volchg
+	help_volchg
+hide
+	help_hide
+

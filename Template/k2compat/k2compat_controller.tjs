@@ -1,0 +1,33 @@
+Krkr2CompatUtils.require("modeless");
+
+//=============================================================
+
+// コントローラ互換実装
+class        DebugControllerCompatDialog extends WIN32ModelessDialogEX {
+	function DebugControllerCompatDialog { super.WIN32ModelessDialogEX(...); }
+	function finalize { super.finalize(...); }
+
+	var _title = "Controller";
+	var _borderStyle = bsToolWindow;
+	function getDialogTemplate(elmov) {
+		var style = getWindowStyle();
+		var dlgsty = getDialogStyle();
+		var exstyle = WS_EX_TOPMOST;
+		var btnsty = BS_ICON;
+		var sz = 12;
+		var cx = sz*5, cy = sz;
+		return %[   style: style[0] | dlgsty, exStyle: style[1] | exstyle,
+					/**/title: _title, x:_left, y:_top, cx:cx, cy:cy,
+				items:
+					[
+						PushButton("", "scred", sz*0, 0, sz, sz, btnsty),
+						PushButton("", "watch", sz*1, 0, sz, sz, btnsty),
+						PushButton("", "cons",  sz*2, 0, sz, sz, btnsty),
+						PushButton("", "event", sz*3, 0, sz, sz, btnsty),
+						PushButton("", "exit",  sz*4, 0, sz, sz, btnsty)//,
+					  ],
+				  ];
+	}
+	function getDialogStyle() { return DS_FIXEDSYS | DS_CENTERMOUSE | WS_VISIBLE; }
+
+}

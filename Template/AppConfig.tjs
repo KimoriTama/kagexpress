@@ -1,0 +1,34 @@
+var SystemConfig = %[
+"Maker"    => "ゆずソフト",
+"MakerURL"  => "http=>//www.yuzu-soft.com/",
+"GameName"  => "サノバウィッチ",
+"GameURL"   => "http=>//www.yuzu-soft.com/new/product/sothewitch/",
+"GameId"    => "{B0CEB0CE-9DA7-4667-A104-1DDB6E7AACD0}",
+"ReadmeFile"=> "readme.txt",
+"IconFile"  => "setup/yuzu.ico",
+"SystemDefaultFontColor" =>"0x591515",  // 系统ui默认的文字颜色
+"FloatLayerAbsolute" => 9000000,  // 浮动层默认高度
+"tabSize"=>		4,///t 等于几个空格的长度
+"UiAnimeTime" =>300, //默认的ui动画时间
+// 快捷菜单的设置
+"QuickMenuPopWidth" => void,    //感应弹出位置
+"QuickMenuPopHeight" => 23,
+"askQLoad"    => false, // クイックロード確認
+"askQSave"    => false, // クイックセーブ確認
+"notifyQLoad" => false, // クイックロード完了報告
+"notifyQSave" => true,  // クイックセーブ完了報告
+"askNext"     => true,  // 次の選択肢確認
+"askPrev"     => true,  // 前の選択肢確認
+//	对话框的设置
+"askOverwrite"=> true,  // 上書き確認
+"askInit"     => true,  // 初期化確認
+"askTitle"    => true,  // タイトルへ戻る確認
+"askExit"     => true,  // ゲーム終了確認
+"recollectionFadeInStart"=> true, // 回想開始時にロードと同じフェード処理を入れるかどうか	回想开始时是否进行与加载相同的淡入处理
+"disableDisplayMenuInMoviePlaying" => false, // ムービー再生中に画面モードの切り替えを不可にするか
+"disableTroubleShootMenuFlatten"   => false, // 不具合回避の子メニューを上に展開しない
+  "DialogStorgae" =>		"dialog",//	对话框ui存储名
+  "DialogFadeTime" => 			300,//渐变时间
+  "DialogCursorMoveTime" => 	300,//鼠标移动时间
+  "DialogMaskThreshold" => 	64	//遮罩区域透明度
+	];

@@ -1,0 +1,105 @@
+/**
+ * ループボイス用情報		循环声音用的信息
+ */
+class LoopVoiceInfo
+{
+	// 情報保持用		存储信息用
+	var list = [];
+
+	/**
+	 * コンストラクタ	构造函数
+	 */
+	function LoopVoiceInfo() {
+	}
+
+	function clear() {
+		//dm("ループボイス情報クリア");
+		list.clear();
+	}
+
+	/**
+	 * ループボイス情報探索		寻找循环声音信息
+	 * @param name キャラ名	角色名
+	 */
+	function find(name) {
+		var count = list.count;
+		for (var i=0;i<count;i++) {
+			var info = list[i];
+			if (info.name == name) {
+				return info;
+			}
+		}
+	}
+
+	/**
+	 * ループボイス再生指定		指定播放的循环声音
+	 * @param elm
+	 */
+	function start(elm) {
+		var info = find(elm.name);
+		if (info === void) {
+			info = %[name:elm.name];
+			list.push(info);
+		}
+		info.voice  = elm.voice;
+		info.type   = +elm.type;
+		info.noflip = +elm.noflip;
+		info.pan    = +elm.pan;
+		info.fade   = elm.fade !== void ? +elm.fade : 100;
+	}
+
+	/**
+	 * ループボイス音量変更		变更循环声音音量
+	 * @param name キャラ名
+	 */
+	function fade(name, fade) {
+		var count = list.count;
+		for (var i=0;i<count;i++) {
+			if (name == "" || list[i].name == name) {
+				list[i].fade = fade !== void ? +fade : 100;
+			}
+		}
+	}
+	
+	/**
+	 * ループボイス停止指定		结束循环声音
+	 * @param name キャラ名
+	 */
+	function stop(name) {
+		//dm("ループボイス停止:" + name);
+		if (name == "") {
+			clear();
+		} else {
+			var count = list.count;
+			for (var i=0;i<count;i++) {
+				if (list[i].name == name) {
+					list.erase(i);
+					break;
+				}
+			}
+		}
+	}
+
+	/**
+	 * ループボイス状態保存		保存状态
+	 */
+	function onStore(f) {
+		if (list.count > 0) {
+			f.loopVoiceList = [];
+			f.loopVoiceList.push(list*);
+		}
+	}
+	
+	/**
+	 * ループボイス状態復帰		恢复状态
+	 */
+	function onRestore(f) {
+		clear();
+		if (f.loopVoiceList !== void) {
+			foreach(f.loopVoiceList, function(id,value) { 
+				list.push(value);
+			});
+		}
+	}
+	
+};

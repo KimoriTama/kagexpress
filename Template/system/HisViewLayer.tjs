@@ -1,0 +1,190 @@
+class HisViewLayer extends KAGLayer{// 履历层 在400万 高度，所以一般要低于此高度
+
+    function HisViewLayer(win,parent){
+        super.KAGLayer(win,parent);
+        focusable = false;
+        hasImage = false;
+        numCharacterLayers = win.numCharacterLayers;
+        this.visible = false;
+        this.width = win.scWidth;
+        this.height = win.scHeight;
+
+        base = new BaseLayer(win, this, "snapshot-base");//背景层的表层是主图层
+        base.setImageSize(win.scWidth, win.scHeight);
+        base.setSizeToImageSize();
+        base.absolute =1;
+
+        // 舞台レイヤ 背景レイヤの上			生成舞台层
+        stage = new StageLayer(win, base, "snapshot-stage", "stage");
+        stage.setImageSize(win.scWidth, win.scHeight);
+        stage.setSizeToImageSize();
+        stage.absolute = 100;
+
+        event = new StageLayer(win, base, "snapshot-event", "event");
+        event.setImageSize(win.scWidth, win.scHeight);
+        event.setSizeToImageSize();
+        event.absolute = 6 * 100000 - 100;
+
+    }
+
+    function finalize(){
+        invalidate base;
+        invalidate event;
+        invalidate stage;
+        foreach(layers,function(k,v){
+            invalidate v;
+        });
+    }
+    var numCharacterLayers;
+    var snapshotLayer;
+    var base;
+    var event;
+    var stage;
+    var layers = [];
+
+
+    function reorderLayers()
+	{
+        // ステージレイヤ
+        stage.absolute = 100;
+        stage.absolute = 100;
+        // レイヤを正しい順序に並び替える
+        var indexes = %[];
+        for(var i = 0; i<layers.count; i++)
+        {
+            var level = layers[i].level;
+            var index = indexes[level];
+            if (index === void) {
+                index = (level + 1) * 100000;
+            }
+            layers[i].absolute = index;
+            index += 100;
+            indexes[level] = index;
+        }
+        // イベントレイヤ      事件层 在 60万高度左右
+        event.absolute = 6 * 100000 - 100;
+        event.absolute = 6 * 100000 - 100;
+	}
+
+    /**
+	* 分配前景层
+	* num 数量 reorder 是否重排序  level重排序的起始高度
+	*/
+    function allocateCharacterLayers(num, reorder=true,level=0) 
+	{
+		// 前景レイヤ数を num に設定する
+		if(layers.count > num)
+		{
+			// レイヤが減る
+			for(var i = num; i<layers.count; i++)
+			{
+				invalidate layers[i];
+			}
+			layers.count = num;
+		}
+		else if(layers.count < num)
+		{
+            if (reorder) {
+                for(var i = layers.count; i<num; i++)
+                {
+                    layers[i] = new CharacterLayer(window, base, "表前景レイヤ" + i, i, level);
+                }
+                reorderLayers(true, false);
+            } else {
+                // 該当レベルで最大の index 値をさがす  获取最大的层高度
+                var foreindex = (level + 1) * 100000;   
+                for (var i=0; i<layers.count;i++) {
+                    if (layers[i].level == level && layers[i].absolute > foreindex) {
+                        foreindex = layers[i].absolute;
+                    }
+                }
+                foreindex += 100;
+                for(var i = layers.count; i<num; i++) {
+                    layers[i] = new CharacterLayer(window, base, "表前景レイヤ" + i, i, level);
+                    layers[i].absolute = foreindex;
+                    foreindex += 100;
+                }
+            }
+        }
+		numCharacterLayers = num;
+	}
+    function internalRestoreFlags(f)
+	{
+		numCharacterLayers = f.numCharacterLayers if !isBlank(f.numCharacterLayers);
+		
+        base.restore(f.foreBaseLayer);
+        stage.restore(f.foreStageLayer);
+        event.restore(f.foreEventLayer);
+		allocateCharacterLayers(numCharacterLayers);
+		// 前景レイヤ
+        for(var i = 0; i < numCharacterLayers; i++)
+        {   
+            layers[i].restore(f.foreCharacterLayers[i]);
+        }
+	}
+
+    function show(num){
+        if(visible)return;
+        internalRestoreFlags(_getHistoryDaya(num)["core"]);
+        this.absolute = kag.historyLayer.absolute -1;
+        this.visible = true;
+    }  
+    function hide(){
+        this.visible = false;
+    }
+
+    function getSnapshot()
+	{
+        if(isBlank(snapshotLayer))
+            snapshotLayer = new global.Layer(kag, this);
+        snapshotLayer.name = "layer for screen shot";
+        snapshotLayer.setImageSize(kag.scWidth, kag.scHeight);
+        snapshotLayer.face = dfAlpha;
+        snapshotLayer.piledCopy(0, 0,base, 0, 0, kag.scWidth, kag.scHeight);
+	}
+
+    function quickSave(filename,num = kag.historyOfStore.count-1){
+        var data = _getHistoryDaya(num);
+        show(num);
+        getSnapshot();
+        var size = kag.calcThumbnailSize();
+        var tmp = kag.temporaryLayer;
+        try
+        {
+            tmp.type = ltOpaque;
+            tmp.setImageSize(size.width, size.height);
+            tmp.setSizeToImageSize();
+            tmp.face = ltOpaque;
+            tmp.stretchCopy(0, 0, size.width, size.height, snapshotLayer,0, 0, snapshotLayer.imageWidth, snapshotLayer.imageHeight, stLinear);
+            try
+            {
+                // サムネイルを保存
+                tmp.saveLayerImage(filename, "bmp" + kag.thumbnailDepth);
+
+                // データを保存
+                var mode = kag.saveDataMode;
+                mode += "o" + size.size; // モード文字列に 書き込みオフセットを指定
+                (Dictionary.saveStruct incontextof data)(filename, mode);
+            }
+            catch(e)
+            {
+                invalidate tmp;
+                System.inform("can't save file(can't open file,or write is forbidden)");
+                return false;
+            }
+        }
+        catch(e)
+        {
+            invalidate tmp;
+            throw e;
+        }
+        this.visible = false;
+
+    }
+
+    function _getHistoryDaya(num = kag.historyOfStore.count-1)
+	{
+        if(num<0) throw new Exception("there is no enough history data");
+        return kag.historyOfStore[num];    // 核心数据存储的是层样式
+	}
+}

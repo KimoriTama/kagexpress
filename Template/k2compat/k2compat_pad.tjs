@@ -1,0 +1,15 @@
+Krkr2CompatUtils.require("padcommon");
+
+class        Pad extends DebugPadCompatDialog{
+	function Pad { super.DebugPadCompatDialog(); }
+	function finalize { super.finalize(...); }
+	var _title = "Pad";
+	var _execEnabled = false;
+	function getInitialIcon { return "pad"; }
+}
+class        DebugScriptEditorCompatPad extends DebugPadCompatDialog{
+	function DebugScriptEditorCompatPad { super.DebugPadCompatDialog(); }
+	function finalize { super.finalize(...); }
+	var _title = "ScriptEditor";
+	function getInitialIcon { return "pad"; }
+}

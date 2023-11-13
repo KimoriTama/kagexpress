@@ -1,0 +1,602 @@
+// HistoryLayer.tjs - メッセージ履歴レイヤ
+// Copyright (C)2001-2005, W.Dee and contributors  改変・配布は自由です
+
+//想要的方法  backupCurrentMessageVisibleState  loaduiinfo
+// 考虑的问题  使用uiload全部控件，那么滚动条之类的滚动触发函数要如何处理 
+class HistoryLayer extends MessageLayer
+{
+	var data = []; // 履历信息
+
+	// 機能ボタンの UIパーツ名デフォルト
+	var sliderName     =  "slider";
+	var upButtonList = [ "up",   "pageup",   "top" ];
+	var downButtonList = [ "down", "pagedown", "end" ];
+
+	//config 设置的部分
+	var maxLines = 1<<24; // 最大保持行数   
+	var lineStep;	// 滑动长度
+	var pageStep;	// 翻页的长度
+	var longStep;    // 履历太长  一次不会全部显示的数量
+	var blockStep;   // 块的步长
+	var dispHeight;		// block 展示部分的高度
+
+	var textLayerLeft; // 文字层左偏移
+	var textLayerTop; // 文字层上偏移
+	var textLayerWidth; // 文字层宽度
+	var textLayerHeight; // 文字层高度
+	var nameWidth;	//名称绘制宽度
+	var textLayerAbsolute;
+
+	var blockHeight; // ブロックの高さ blockHeight < blockStep であること
+	var blockBaseLayer;
+	var _defaultDispCount = 5; // 默认每页显示块数量
+
+	var jumpButtonName    = "jump";
+	var vreplayButtonName = "vreplay";
+	var jumpButtonUi;
+	var vreplayButtonUi;
+
+	var _scroll;
+	var hisViewLayer;
+	var _textBlocks = %[];
+
+
+	function HistoryLayer(win, par)// hisview render 
+	{
+		global.DialogLayer.DialogLayer(...);
+		left = 0;
+        top  = 0;
+
+		_opacity = super.opacity;
+        _visible = super.visible;
+		imageModified = true;
+        eventTransparent = false;	// ！！禁止履历层透过事件，否则会点到后面
+		name = "history layer";
+
+		(HistoryLayer_config incontextof this)();
+		(HistoryLayer_config_override incontextof this)()
+			if typeof global.HistoryLayer_config_override != "undefined";
+
+		// 初期サイズは mw mh に入っているので
+		setPos(ml, mt);
+		setImageSize(mw, mh);
+		setSizeToImageSize();
+
+		focusable = true;
+		delete ml; delete mt; delete mw; delete mh;
+
+		hitType = htMask;
+		hitThreshold = 0;
+		cursor = window.cursorDefault;
+		init();
+		mainRender = new TextRender(this,null,SystemLanguage.mainLan);
+		subRender = new TextRender(this,null,SystemLanguage.subLan);
+
+		hisViewLayer = new HisViewLayer(window,parent);	// 生成履历预览层  
+
+		_fadeTimer = new Timer(fadeHandler, '');				//渐入渐出的定时器
+        _fadeTimer.capacity = 1;
+        _fadeTimer.interval = 10;
+        _fadeTimer.enabled  = false;
+
+		setup();
+	}
+	function setSizeToImageSize(){
+		global.DialogLayer.setSizeToImageSize();
+	}
+	function setCompLayer(lay) { 
+		comp = lay;
+		comp.data = data;		// 表层里层共有数据
+	}
+
+	function clearLayer(){
+		global.DialogLayer.clearLayer();
+	}
+	function finalize()
+	{
+        global.DialogLayer.finalize();
+		clearAllTextBlocks();
+		invalidate hisViewLayer;
+		invalidate mainRender;
+		invalidate subRender;
+        invalidate textLayer;
+	}
+
+	// --------------不想要的父类方法-------------------------------
+	function clearTimeout() {}
+    function addTimeout() {}
+    function stopTimeout() {}
+    function startTimeout() {}
+	function clearClick() {}
+    function addClick() {}
+    function hasClick() {}
+    function processClick() {}
+    function onRenderComplete() {}
+	function clear(){}
+	function onMouseUp(x, y, button)
+	{global.DialogLayer.onMouseUp(...);}
+	// 其他的也有不想要的，这些是因为会自动触发所有扔了 todo 再次检查
+	function setOptions(elm){
+		global.DialogLayer.setOptions(elm);
+	}
+
+
+	function onUiloaded(entry){
+		super.onUiloaded(entry);
+		var res = entry.result;
+		
+		if(!isBlank(res,jumpButtonName)){
+			jumpButtonUi = %[];
+			(Dictionary.assign incontextof jumpButtonUi)(res[jumpButtonName]);
+			jumpButtonUi.visible = true;
+			jumpButtonUi.x -=textLayerLeft;
+			jumpButtonUi.y -=textLayerTop;
+		}
+
+		if(!isBlank(res,vreplayButtonName)){
+			vreplayButtonUi = %[];
+			 (Dictionary.assign incontextof vreplayButtonUi)(res[vreplayButtonName]);
+		}
+	}
+
+
+	/** 
+	* @description: 	初始化时设置各项基本参数
+	* @param elm		初始化相关参数
+	* @return 
+	*/	
+	function setup(elm) {
+		// ヒストリアイテム個数
+		createBlockBaseLayer();
+		// デフォルトパラメータの決定
+		dispHeight  = blockBaseLayer.height if (dispHeight === void);
+		blockHeight = dispHeight\_defaultDispCount if (blockHeight === void);//单个块高度
+		blockStep   = blockHeight  if (blockStep === void);			//步长
+
+		lineStep    = blockStep    if (lineStep === void);
+		pageStep    = (dispHeight \ blockStep) * blockStep if (pageStep === void);
+		longStep    = pageStep * 100 if (longStep === void);
+
+		// 决定滚动范围
+		scrollMin = scrollMax = 0;	// 会同时设置_scroll
+	}
+
+	//------------------------------------------------
+	var _scrollMin;
+	property scrollMin {
+		getter { return _scrollMin; }
+		setter(v) {
+			if (v < 0) v = 0;
+			else if (v > scrollMax) v = scrollMax;
+			_scrollMin = v;
+			scroll = _scroll;
+		}
+	}
+
+	var _scrollMax;
+	property scrollMax { 
+		getter { return _scrollMax; }
+		setter(v) {
+			if (v < 0) v = 0;
+			var max = getScrollMax(); 
+			if(v>max) v= max;
+			_scrollMax = v;
+			scroll = _scroll;
+		}
+	}
+
+	property scroll {			//以像素为单位记录总长度，  动画变更基本由此属性控制
+		getter { return _scroll; }
+		setter(v) {
+			if (!isvalid this) return;
+			var max = scrollMax;
+			var min = scrollMin;
+			if (v > max || v <min) v = max;
+			if (_scroll === void || _scroll != v) {
+				_scroll = (int)v;
+				updateButtonState();
+				updateTextBlock(_scroll);  
+				// updateTopCaption();  // TODO 更新文字和标题
+			}
+		}
+	}
+
+	//---------------------初始化及创建文字块-------------------
+	
+	function getTextBlockViewList(pos) { //获得从pos位置开始要展示的 block 序号列表  pos代表履历第位置  0是最开始
+		var num = pos \ blockStep; // pos 之前的块有多少
+		if (pos - num * blockStep >= blockHeight) num++; // 行間から開始する場合は次の番号  超过块到达间距则从下一个开始
+
+		var r = [], y = num * blockStep, bottom = pos + dispHeight;
+		while (y < bottom && num < data.count) r.add(num++), y += blockStep;
+		return r;
+	}
+
+	function clearAllTextBlocks() {
+		foreach(_textBlocks,function(k,v){
+			invalidate v;
+		});
+		_textBlocks = %[];
+	}
+
+	function drawTextBlock(block) {
+		var blockInfo = block.blockInfo;
+		if(isBlank(block.blockInfo) || isBlank(block.blockInfo.storage))
+		 	throw new Exception("the block info in blank",Scripts.getTraceString());
+		block.fillRect( 0, 0, block.imageWidth, block.imageHeight, 0);
+		var textInfo = SystemLanguage.getScenarioText(SystemLanguage.mainLan,blockInfo.storage,blockInfo.num);
+		var doubleLan = !isBlank(SystemLanguage.subLan) && SystemLanguage.subLan != SystemLanguage.mainLan;
+
+		var x,y;
+		if(vertical)
+		{
+			x = imageWidth - marginR;
+			y = marginT;
+		}
+		else
+		{
+			x = marginL;
+			y = marginT;
+		}
+		var endPosition = mainRender.init(%[x:x,y:y],block,textInfo.text);
+		x = endPositionX = endPosition.x , y = endPositionY = endPosition.y;
+		mainRender.startRender(true);
+		//副语言处理
+		if(!doubleLan) return;
+		if(vertical)
+		{
+			y = marginT;
+			x -= lineSize + lineSpacing;
+		}
+		else
+		{
+			y += lineSize + lineSpacing;
+			x = marginL;
+		}
+		textInfo = SystemLanguage.getScenarioText(SystemLanguage.subLan,blockInfo.storage,blockInfo.num);
+		subRender.shrinkRatio = shrinkRatio; 
+		endPosition = subRender.init(%[x:x,y:y],block,textInfo.text);
+		endPositionX = endPosition.x,endPositionY = endPosition.y;
+		subRender.startRender(true);		
+	}
+
+	function createBlockLayer(id) {	//创建block的层 ， 父层为base基层
+		var lay = new global.DialogLayer(kag, blockBaseLayer);
+		with (lay) {
+			.blockInfo = data[id];
+			.id = id;
+			.name = "history block " + id;
+			.face = dfAuto;
+			.hisViewLayer =  hisViewLayer; // 为了使用父层的显示图层
+			.left = 0;	
+			.setSize(blockBaseLayer.width, blockHeight);
+			.visible = true;
+			.hitThreshold = 0;
+			.showHisView = showHisView incontextof lay;	//里面加上方法，方便里面的按钮使用
+			.hideHisView = hideHisView;
+			.jumpHis = jumpHis incontextof lay;
+		}
+		return lay;
+	}
+
+
+	/** 
+	* @description: 	创建一个文字块,并绘制上文字,创建跳转按钮和语音按钮
+	* @param id			履历数据的id
+	* @return 			文字块的层
+	*/
+	function createTextBlock(id) {
+		var lay = createBlockLayer(id);
+		drawTextBlock(lay);
+		if(!isBlank(jumpButtonUi))
+			lay.addButton(jumpButtonUi);
+		if(!isBlank(vreplayButtonUi))	//todo 检测有没有语音
+			lay.addButton(vreplayButtonUi);
+		return lay;
+	}
+
+	//设置block位置  lay: block pos :位置
+	function setTextBlockPos(id, lay, pos) {	
+		lay.top = id * blockStep - pos;
+	}
+
+	function updateTextBlock(pos) {	// 从pos位置开始更新block
+		var list = getTextBlockViewList(pos), update = %[];
+		if (!isBlank(list)) {	
+			for (var i = list.count-1; i >= 0; i--) {		//从下到上更新
+				var id = list[i];
+				if (isBlank(id)) 
+					throw new Exception("the text id is blank");
+				var bk;
+				if (!isBlank(_textBlocks[id])) {		//过去的履历不为空则移动
+					bk = update[id] = _textBlocks[id];
+					delete  _textBlocks[id];
+				} else {
+					bk = update[id] = createTextBlock(id);
+				}
+				bk.top = id * blockStep - pos; // 重新设置层的位置
+				// setTextBlockPos(id, bk, pos);	
+			}
+			clearAllTextBlocks();
+			(Dictionary.assign incontextof _textBlocks)(update);
+		} else {
+			clearAllTextBlocks();
+		}
+	}
+	function createBlockBaseLayer() {	//	创建block的父层
+		textLayer = blockBaseLayer = new global.Layer(window, this);
+		with (blockBaseLayer) {
+			.name = "history layer textLayer";
+			.hasImage = false;
+			.setPos(textLayerLeft, textLayerTop, textLayerWidth, textLayerHeight); 
+			.absolute = textLayerAbsolute;  
+			.hitType = htMask;
+			.hitThreshold = 256;
+			.visible = true;
+		}
+	}
+
+
+	// 获取翻页的滚动条的总长度
+	function getScrollMax(cnt = data.count) {	
+		var r = 0;
+		if (cnt > 0) {
+			r = (blockStep * (cnt-1)) + blockHeight - dispHeight;
+			if (r < 0) r = 0;
+			else {
+				r = ((r + blockStep -1) \ blockStep) * blockStep;	// 必须为 blockStep 的整数倍(代表拉到最后时，隐藏了几个块)
+			}
+		}
+		return r;
+	}
+
+	/** 
+	* @description: 每次显示时的初始化方法，重置所有文字块，更新可滑动区域，更新按钮
+	* @return 
+	*/
+	function dispInit()
+	{
+		clearAllTextBlocks();
+		scrollMax = getScrollMax(); 
+		scrollMin = longStep > 0 ? (scrollMax - longStep) : 0;
+		_scroll = scrollMax;
+		updateTextBlock(scrollMax);  
+		updateButtonState();
+		this.visible = true;
+	}
+	//-----------------------滚动相关--------------------------
+
+	function doScroll(move) {	// 开始滚动move个单位
+		var to,  from = scroll;
+		to = from + move;
+		if (to < scrollMin) to = scrollMin;
+		else if (to > scrollMax) to = scrollMax;
+		_startScrollAction(from, to, 200) if (from != to);
+	}
+	function _startScrollAction(from, to, time) {	// 开始滚动动画
+		if (time <= 0) scroll = to;
+		else {
+			delAction("scroll");
+			var act = [ %[scroll:%[ handler:MoveAction, start:from, value:to, time:time ],nofast:true]];
+			addAction("scroll", true, act);
+		}
+	}
+
+	function scrollDown()  { doScroll( lineStep); }
+	function scrollUp()    { doScroll(-lineStep); }
+	function nextPage()    { doScroll( pageStep); }
+	function prevPage()    { doScroll(-pageStep); }
+	function endPage()     { doScroll( scrollMax); }
+	function topPage()     { doScroll(-scrollMax); }
+	//滚动至下一个选择支  以后考虑
+	// function prevStop()    { if (_jumpEnabled) doScrollToStop("Prev"); else topPage(); }	
+	// function nextStop()    { if (_jumpEnabled) doScrollToStop("Next"); else endPage(); }
+
+	property canScroll     { getter { return scroll<scrollMax || scroll>scrollMin; } }
+	property canScrollUp   { getter { return scroll>scrollMin; } }
+	property canScrollDown { getter { return scroll<scrollMax; } }
+
+
+	function updateButtonState() {
+		_updateUpButton();
+		_updateDownButton();
+		_updateSlider();
+	}
+	function _updateDownButton() { 
+		for(var i=0;i<downButtonList.count;i++){
+			if(isBlank(names[downButtonList[i]]))continue;
+			names[downButtonList[i]].enabled = canScrollDown;
+		}	
+	}
+	function _updateUpButton() { 
+		for(var i=0;i<upButtonList.count;i++){
+			if(isBlank(names[upButtonList[i]]))continue;
+			names[upButtonList[i]].enabled = canScrollUp;
+		}	
+	}
+	function _updateSlider() {		// 更新滚动条属性
+		var slider =names[sliderName]; 
+		if(isBlank(slider))return;
+		slider.enabled = canScroll;
+		slider.min = scrollMin;
+		slider.max = scrollMax;
+		slider.step = pageStep;
+		slider.position = scroll;
+	}
+
+
+
+	function showHisView(){
+		hisViewLayer.show(id);
+	}
+	function hideHisView(){
+		hisViewLayer.hide();
+	}
+	function jumpHis(){
+		kag.goBackYes(id);
+	}
+
+	function updateTopCaption(info) {
+		if (info !== void && _topCaption != info.title) {
+			_topCaption = info.title;
+			updateCaption(_topCaption);
+		}
+	}
+
+	function updateCaption {}
+
+
+
+	//---------------------------------------------------------------------------------
+
+
+
+	/** 
+	* @description: 	履历层的渐变，仅会复制按钮和可滑动区域，其余一律不复制
+	* @param src		来源层
+	* @return 		void
+	*/
+	function atEndOfTransition(src){
+		global.AnimationLayer.atEndOfTransition(...);
+		if(src==null)return;
+		assign(src,true);
+		window.swapHistoryLayer();
+	}
+	/** 
+	* @description: 	渐变结束后的复制逻辑在这里，因为文字层带有子图层不会直接复制，而是调整自身的scroll达到相同目的
+	* @param src		源图层
+	* @return 
+	*/	
+	function internalAssign(src)
+	{
+       
+		// その他の情報のコピー
+		// [start_assign_vars] と [end_assign_vars] の間は
+		// perl によって自動生成されるので、このマークを消したり、
+		// 二つのマークの間を編集したりしないこと。
+		// [start_assign_vars]
+		marginL = src.marginL;
+		marginT = src.marginT;
+		marginR = src.marginR;
+		marginB = src.marginB;
+		marginRCh = src.marginRCh;
+		relinexpos = src.relinexpos;
+	
+		defaultFontSize = src.defaultFontSize;
+		fontSize = src.fontSize;
+		defaultLineSize = src.defaultLineSize;
+		reserveLineSize = src.reserveLineSize;
+		lineSize = src.lineSize;
+		defaultRubySize = src.defaultRubySize;
+		rubySize = src.rubySize;
+		defaultRubyOffset = src.defaultRubyOffset;
+		rubyOffset = src.rubyOffset;
+		defaultLineSpacing = src.defaultLineSpacing;
+		lineSpacing = src.lineSpacing;
+		defaultPitch = src.defaultPitch;
+		pitch = src.pitch;
+		defaultShadow = src.defaultShadow;
+		shadow = src.shadow;
+		defaultEdge = src.defaultEdge;
+		edge = src.edge;
+		defaultShadowColor = src.defaultShadowColor;
+		shadowColor = src.shadowColor;
+		defaultEdgeColor = src.defaultEdgeColor;
+		edgeColor = src.edgeColor;
+		defaultBold = src.defaultBold;
+		bold = src.bold;
+		italic = src.italic;
+		defaultChColor = src.defaultChColor;
+		chColor = src.chColor;
+		antialiased = src.antialiased;
+		edgeExtent = src.edgeExtent;
+		edgeEmphasis = src.edgeEmphasis;
+		shadowOffsetX = src.shadowOffsetX;
+		shadowOffsetY = src.shadowOffsetY;
+		shadowWidth   = src.shadowWidth;
+		lineLayerPadding = src.lineLayerPadding;
+		align = src.align;
+
+		scrollMax = src.scrollMax;
+		scrollMin = src.scrollMin;
+		scroll = src.scroll;
+    }
+
+	function store()
+	{
+		var dic =global.DialogLayer.store();
+		(dic.data = []).assignStruct(data);
+		return dic;
+	}
+
+	function restore(dic){	// 乍看会造成引用和参数一致，实际上参数的位置不会对data进行变更，所以其实没啥问题
+		global.DialogLayer.restore(dic);
+		data = dic.data;
+		comp.data = data;
+	}
+	function record(elm){
+		data.push(%[storage:elm.storage,num:elm.num]);
+	}
+	
+	
+	function close() {
+		if (kag.inStable) SystemAction.backlog();
+		else kag.onPrimaryClick();
+	}	
+	function onHitTest(x,y,b){	// 避开消息层
+		return global.DialogLayer.onHitTest(...);
+	}
+
+	function onMouseDown(x, y, button)
+	{
+		if(button == mbRight) close();
+		global.DialogLayer.onMouseDown(...);
+	}
+
+	function onKeyPress(key)
+	{
+		super.onKeyPress(...);
+	}
+
+	function onKeyDown(key, shift, process)
+	{
+		window.hideMouseCursor();
+		if(canScroll)
+		{
+			if(key == VK_DOWN)
+				nextPage();
+			else if(key == VK_UP)
+				prevPage();
+			else if(key == VK_LEFT || key == VK_PRIOR)
+			{
+				scrollUp();
+			}
+			else if(key == VK_RIGHT || key == VK_NEXT)
+			{
+				scrollDown();
+			}
+			
+		}
+		else if(key == VK_ESCAPE)
+		{
+			close();
+		}
+		else global.DialogLayer.onKeyDown(...);
+	}
+	var lastWheelTick = 0;
+
+
+	function windowMouseWheel(shift, delta, x, y)
+	{
+		var currenttick = System.getTickCount();
+		if (delta < 0 && currenttick - lastWheelTick > 200 && !canScrollDown)
+			close();
+		else doScroll(-(int)(delta*blockStep/120));	// 鼠标滑轮滚动，固定block的倍数长度
+		lastWheelTick = currenttick;
+	}
+
+}
+
+
+
+

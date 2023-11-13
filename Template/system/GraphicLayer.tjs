@@ -1,0 +1,1257 @@
+// GraphicLayer.tjs - グラフィック系レイヤ(背景,キャラクタ)
+// Copyright (C)2001-2006, W.Dee and contributors  改変?配布は自由です
+
+class ProvinceContext
+{
+	// 領域アクション用コンテキスト   领域动作用的上下文
+	var target;
+	var storage;
+	var onenter;
+	var onleave;
+	var hint;
+	var exp;
+	var cursor;
+	var autodisable;
+
+	function ProvinceContext() {};
+    function finalize() {};
+}
+/** 
+ * @description: 
+ * 控制渐变的基础逻辑
+ * exchangeInfo 用于交换层的标记信息 name，一般情况不用覆写。
+ * exchange参数仅用于根图层，例如base和ui层,子层可以无视此选项
+ * 渐变后的正常逻辑是: 从对图层复制信息到此层,呼叫kag的交换方法，交换二者的标记信息
+ * 对于根图层,带有withchild、exchange 选项时，会呼叫kag的交换和复制方法
+ */
+class GraphicLayer extends AnimationLayer
+{
+	// 背景/前景レイヤの基本クラス  背景层和 前景层的基本类
+
+	var comp; // 対のレイヤ
+	var id; // ID
+	var provinceActions = void; // クリッカブルマップの領域ごとのアクション定義
+	var pointingProvince = 0; // 現在指し示している領域番号  现在鼠标位于的领域的编号
+	var loadedProvinceImage = ""; // loadImages 後に読み込まれた領域画像
+	var loadedProvinceActions = ""; // loadImages 後に読み込まれた領域アクション   读入的领域图像的动作
+	var defaultCursor = crDefault; // デフォルトのカーソル
+	var lastMouseDownX; // 最後にマウスがクリックされた X 座標      最后的鼠标点击x坐标
+	var lastMouseDownY; // 最後にマウスがクリックされた Y 座標 	    最后的鼠标点击y坐标
+
+	function GraphicLayer(win, par, name, id)
+	{
+		// GraphicLayer コンストラクタ
+		// win    : ウィンドウオブジェクト
+		// par    : 親レイヤ
+		// name   : レイヤの名前
+		super.AnimationLayer(win, par);
+
+		this.name = name;
+		this.id = id;
+		/* 対のレイヤ は、このオブジェクトを作成後に setCompLayer で設定すること */
+	}
+
+	function finalize()
+	{
+		clearProvinceActions();
+		super.finalize(...);
+	}
+	
+	function setCompLayer(lay) { comp = lay; }
+
+	function setDefaultCursor(c)
+	{
+		cursor = defaultCursor = c;
+	}
+
+	/** 
+	* @description: 加载图像，添加了领域图像的逻辑，如果存在领域图像则同时载入
+	* @param elm.mapimage	领域图像
+	* @param elm.mapaction	领域动作信息	
+	* @return 
+	*/
+	function loadImages(elm) //加载图像，
+	{
+		// elm に記述されている内容に従ってこのレイヤに画像を読み込む
+		clearProvinceActions();
+		loadedProvinceImage = "";
+		super.loadImages(elm);
+		if(elm !== void)
+		{
+			if(elm.mapimage !== void) super.loadProvinceImage(elm.mapimage); // 領域画像を読む
+			if(elm.mapaction !== void)
+			{
+				internalLoadProvinceActions(elm.mapaction); // 領域アクションを読む
+			}
+			else
+			{
+				var name;
+				var storage = Storages.getPlacedPath(
+					name = (Storages.chopStorageExt(elm.storage) + ".ma")); // 拡張子が .ma のファイル
+				if(storage != '')
+					loadProvinceActions(name);
+			}
+		}
+	}
+
+	function loadProvinceImage(fn)  //加载领域图像
+	{
+		// 領域画像 fn を読み込む
+		super.loadProvinceImage(fn);
+		loadedProvinceImage = fn;
+	}
+
+	function assignComp()
+	{
+		// 対になるレイヤの内容をコピー
+		assign(comp);
+	}
+
+	function assign(src)
+	{
+		super.assign(...);
+
+		if(provinceActions !== void)
+		{
+			invalidate provinceActions;
+			window.disableMouseKey();
+		}
+		if(src.provinceActions !== void)
+		{
+			(provinceActions = []).assign(src.provinceActions);
+			window.enableMouseKey();
+		}
+		else
+		{
+			provinceActions = void;
+		}
+		loadedProvinceImage = src.loadedProvinceImage;
+		loadedProvinceActions = src.loadedProvinceActions;
+	}
+
+	function freeImage() {
+        super.freeImage(...);
+        reset();
+    }
+	/** 
+	* @description: 	原始的过渡会交换层的位置(父级会改变)，visible 和left 等参数
+	* @param elm
+	* @return 
+	*/	
+	function beginTransition(elm)  //开始过度
+	{
+		// elm に従ってトランジションを行う
+		comp.stopTransition(); // comp で行われていたトランジションも停止
+		super.beginTransition(elm, comp);
+	}
+	/** 
+	* @description: 	交换此层和comp的信息(因为渐变只会交换可见状态，不会交换这些信息)， exchange 参数仅对根图层 例如 base和ui才会生效
+	* @param comp
+	* @return 
+	*/	
+	function exchangeInfo() // 
+	{
+		// comp と情報を取り替える
+		// すでに 画像の内容、ツリー構造は取り変わっているので 因为已经改变了图像的内容、树结构，所以要更换名字等信息
+		// 名前などを取り替える
+		// また、ウィンドウの管理情報も更新するようにする 
+		var src = comp;
+		var tmp = src.name;
+		src.name = name;
+		name = tmp;
+		tmp = src.cursor;
+		src.cursor = cursor;
+		cursor = tmp;
+		//super.exchangeInfo(comp);//affineLayer 没有对层需要传递参数
+	}
+
+	function clearImage(process = true)
+	{
+		// AnimationLayer.clearImage オーバーライド
+		super.clearImage(process);
+		loadedProvinceImage = "";
+		clearProvinceActions();
+	}
+
+	function clearProvinceActions()
+	{
+		if(provinceActions !== void)
+		{
+			invalidate provinceActions;
+			provinceActions = void;
+			pointingProvince = 0;
+			cursor = defaultCursor;
+			hint = "";
+			showParentHint = true;
+			window.disableMouseKey();
+		}
+		loadedProvinceActions = "";
+	}
+
+	function internalLoadProvinceActions(fn)  //加载.ma文件的定义领域图像动作的的方法，核心逻辑在这里
+	{
+		// ファイル名 fn を領域アクション定義ファイルとして読み込む
+		clearProvinceActions();
+
+		var file = [];
+		file.load(fn);
+		var filelines = file.count;
+
+		// ファイルに従ってスクリプトを動的に生成
+		var body = "function { var a = provinceActions; \n";
+		for(var i = 0; i<filelines; i++)
+		{
+			var line = file[i];
+			if(line == "" || line[0] == ';') continue;
+			var colon = line.indexOf(':');
+			if(colon == -1) continue;
+			body += "a[" + line.substring(0, colon) + "] = function { " +
+				line.substring(colon + 1) + " ;};\n";
+		}
+		body += "}\n";
+
+		provinceActions = [];
+		(Scripts.eval(body) incontextof this) (); // body のコンパイルをしてこのコンテキスト上で実行
+
+		window.enableMouseKey();
+	}
+
+	function loadProvinceActions(fn)
+	{
+		internalLoadProvinceActions(fn);
+		loadedProvinceActions = fn;
+	}
+
+	function queryProvinceAction(n, checkzero = true) //根据鼠标的位置取得目前位于哪个领域上
+	{
+		// 領域番号 n に関するアクションを返す
+		// アクションがなにも定義されていなければ void を返す
+		// dm(n, provinceActions, provinceActions[n]);
+		if(provinceActions === void) return void;
+		if(checkzero) { if(n == 0) return void; }
+		var action = provinceActions[n];
+		if(action === void) return void;
+		var ar = new ProvinceContext();
+		(action incontextof ar) (); // ar のコンテキスト上でアクションを実行
+		if(ar.target === void && ar.storage === void && ar.onenter === void &&
+			ar.onleave === void && ar.hint === void && ar.exp === void &&
+			ar.cursor === void && ar.autodisable === void)
+				return void;
+		return ar;
+	}
+
+	function onMouseMove(x, y)
+	{
+		// onMouseMove イベントハンドラ
+		super.onMouseMove(...);
+		if(provinceActions !== void)
+		{
+			var n = window.messageLayerHiding ? 0 : getProvincePixel(x - imageLeft, y - imageTop);
+			if(n != pointingProvince)
+			{
+				// 異なる領域の上を動いた場合
+				if(pointingProvince != 0) onProvinceLeave(pointingProvince);
+				if(n != 0) onProvinceEnter(n);
+				pointingProvince = n;
+			}
+			if(n == 0)
+			{
+				hint = "";
+				showParentHint = true;
+				cursor = defaultCursor;
+			}
+		}
+	}
+
+	function onMouseLeave()
+	{
+		// onMouseLeave イベントハンドラ
+		super.onMouseLeave(...);
+		if(pointingProvince != 0)
+		{
+			onProvinceLeave(pointingProvince);
+			pointingProvince = 0;
+		}
+	}
+
+	function onProvinceEnter(n)
+	{
+		// 領域番号 n にマウスが移動した
+		var action = queryProvinceAction(n);
+		if(action !== void)
+		{
+			if(action.onenter !== void) Scripts.eval(action.onenter);
+			if(action.hint !== void) hint = action.hint;
+			if(action.cursor !== void)
+				cursor = action.cursor; // カーソル指定の方法に注意(&はつけない)
+			else
+				cursor = window.cursorPointed;
+		}
+		else
+		{
+			hint = "";
+			showParentHint = true;
+			cursor = defaultCursor;
+		}
+	}
+
+	function onProvinceLeave(n)
+	{
+		// 領域番号 n からマウスが離れた
+		var action = queryProvinceAction(n);
+		if(action !== void && action.onleave !== void) Scripts.eval(action.onleave);
+		hint = "";
+		showParentHint = true;
+	}
+
+	function processProvince(x, y)
+	{
+		// x, y 位置の領域で指定されたシナリオにジャンプする
+		// 処理された場合は true, されなかった場合は false を返す
+		var n = window.messageLayerHiding ? 0 : getProvincePixel(x - imageLeft, y - imageTop);
+		var action = queryProvinceAction(n);
+		if(action === void) return false;
+		if(action.exp !== void) Scripts.eval(action.exp);
+		if(action.storage != '' || action.target != '')
+		{
+			var q = queryProvinceAction(0, false);
+			if(q === void || q.autodisable === void || +q.autodisable) clearProvinceActions(); // 如果0标记 autodisable为false，则触发点击后不会自动清除点击动作
+			window.process(action.storage, action.target);
+		}
+		return true;
+	}
+
+	function onMouseDown(x, y, button)
+	{
+		lastMouseDownX = x;
+		lastMouseDownY = y;
+		super.onMouseDown(...);
+	}
+
+	function store()
+	{
+		// 情報を辞書配列に記録
+		var dic = super.store();
+		dic.loadedProvinceImage = loadedProvinceImage;
+		dic.loadedProvinceActions = loadedProvinceActions;
+        return dic;
+	}
+
+	function restore(dic)
+	{
+		// dic から情報を読み出す
+		super.restore(dic);
+		if(dic.loadedProvinceImage !== void && dic.loadedProvinceImage !== '')
+			loadProvinceImage(dic.loadedProvinceImage);
+		else
+			loadedProvinceImage = "";
+		if(dic.loadedProvinceActions !== void && dic.loadedProvinceActions !== '')
+			loadProvinceActions(dic.loadedProvinceActions);
+		else
+			clearProvinceActions();
+    }
+
+}
+
+class BaseLayer extends GraphicLayer
+{
+	 property isBaseLayer {
+        getter() {
+            return this === window.fore.base;
+        }
+    }
+	// 背景レイヤ
+
+	function BaseLayer(win, par, name, id)
+	{
+		super.GraphicLayer(win, par, name, id);
+		type = ltCoverRect;
+		hitType = htMask;
+		hitThreshold = 0;
+	}
+
+	function finalize()
+	{
+		super.finalize(...);
+	}
+
+	function assign(src)
+	{
+		// assign オーバーライド
+		super.assign(src);
+		// 親クラスの assign は可視?不可視などをコピーしないが、
+		// 背景レイヤなのでそれでよい
+	}
+
+	function loadImages(elm)// 加载图像如果为主层则可见，此层始终不透明
+	{
+		// loadImages オーバーライド
+		if(elm !== void)
+		{
+			elm.mode = "opaque"; // レイヤモードを変えられると困るので
+			delete elm.index; // インデックスを変えられると困るので
+
+			if(elm.visible !== void)
+			{
+				// visible の状態を変えられると困るので
+				if(isBaseLayer) elm.visible = true; 
+			}
+		}
+		super.loadImages(elm);
+	}
+
+	function restore(dic)
+	{
+		// restore オーバーライド
+		if(isBaseLayer) dic.visible = true; 
+		dic.absolute = 0;
+		super.restore(dic);
+	}
+
+	function setOptions(elm)
+	{
+        // setOptions オーバーライド
+		if(elm.visible !== void)
+		{
+			if(isBaseLayer) elm.visible = true; 
+		}
+		super.setOptions(elm);
+	}
+
+	function internalOnMouseDown(x, y, button, processprovince = true)// 触发领域的点击
+	{
+		// 内部関数
+		var provinceprocessed = false;
+		if(button == mbLeft && processprovince && !window.messageLayerHiding)
+			provinceprocessed = processProvince(x, y);
+		if(button == mbLeft && !provinceprocessed)
+		{
+			// 自身がプライマリレイヤならば、ウィンドウの
+			// onPrimaryClick を呼ぶ
+			if(isBaseLayer) window.onPrimaryClick();
+		}
+		else if(button == mbRight)
+		{
+			// 自身がプライマリレイヤならば、ウィンドウの
+			// onPrimaryRightClick を呼ぶ
+			if(isBaseLayer) window.onPrimaryRightClick();
+		}
+	}
+
+	function onMouseDown(x, y, button)
+	{
+		// マウスが押された
+		super.onMouseDown(...);
+		internalOnMouseDown(x, y, button);
+	}
+	function clearImage() //覆写了父类的clearImage方法，仅会清空领域动作信息，然后把此层的大小设为窗口大小
+	{	
+		// GraphicLayer.clearImage オーバーライド
+		super.clearImage(false);
+		// setImageSize(window.scWidth, window.scHeight);
+		// setSizeToImageSize();
+		face = dfAlpha;
+		fillRect(0, 0, imageWidth, imageHeight, 0xff000000);
+	}
+
+	function atEndOfTransition(src, withchildren, exchange)
+	{
+		// atEndOfTransition オーバーライド
+		super.atEndOfTransition(...);
+		if(src == null)
+		{
+			//?背景レイヤがsrcなしでトランジション(children=true)
+			//　何もしなくてよいが、終了時に子レイヤは非表示になる。
+			//?背景レイヤがsrcなしでトランジション(children=false)
+			//　本当に何もしない。
+		}
+		else
+		{
+			if(withchildren)
+			{
+				//?背景レイヤがsrcありでトランジション(children=true)
+				//　重要な情報をトランジション元と交換、しかも子レイヤに対してもこの
+				//　「重要な情報を相手と交換」の指示を出す。exchange=false の場合はさらに
+				//　トランジション元の情報をトランジション先にコピー。これも、子レイヤすべて
+				//　に対しても指示する。
+				/*将重要信息与变换源交换，并且对子层也发出“将重要信息与对方交换”的指示。
+				如果exchange=false，则将源信息复制到目标位置。这也指示所有子层。*/
+				if(!exchange)
+				{
+					assign(src);
+					window.callAssignTransSrc();
+				}
+				exchangeInfo();
+				window.exchangeForeBack();	//直接交换表里
+				window.callExchangeInfo();
+			}
+			else
+			{
+				//?背景レイヤがsrcありでトランジション(children=false)
+				//　重要な情報をトランジション元と交換。子レイヤに対しては
+				//　「重要な情報を相手と交換」の指示をださない。exchange=false の場合は
+				//　さらにトランジション元の情報をトランジション先にコピー。
+				//　これも子レイヤに対しては指示しない。
+				/*将信息与变换源交换，并且对子层不会发出“将信息与对方交换”的指示。
+				如果exchange=false，则将源信息复制到目标位置。这不会指示所有子层。*/
+				if(!exchange)
+				{
+					assign(src);
+				}
+				exchangeInfo();
+				window.swapBaseLayer();
+			}
+		}
+	}
+}
+class UiLayer extends GraphicLayer {
+	function UiLayer(win, par, name, id)
+	{
+		super.GraphicLayer(win, par, name, id);
+		type = ltAlpha;
+		hitType = htMask;
+		hitThreshold = 16;
+	}
+
+	function clearImage() //覆写了父类的clearImage方法，仅会清空领域动作信息，然后把此层的大小设为窗口大小
+	{
+		// GraphicLayer.clearImage オーバーライド
+		super.clearImage(false);
+		setImageSize(window.scWidth, window.scHeight);
+		setSizeToImageSize();
+		fillRect(0, 0, imageWidth, imageHeight, 0x00000000);
+	}
+	function atEndOfTransition(src, withchildren, exchange)
+	{
+		// atEndOfTransition オーバーライド
+		super.atEndOfTransition(...);
+		if(src == null) return;
+		if(withchildren)
+		{
+			if(!exchange)
+			{
+				assign(src);
+				window.callAssignUiTransSrc();
+			}
+			exchangeInfo();
+			window.exchangeUiForeBack();
+			window.callExchangeUiInfo();
+		}
+		else
+		{
+			if(!exchange)
+			{
+				assign(src);
+			}
+			exchangeInfo();
+			window.swapBaseUiLayer();
+		}
+	}
+}
+
+
+class StageLayer extends GraphicLayer
+{
+    // 舞台?イベント用特殊固定レイヤ
+
+    function StageLayer(win, par, name, id)
+	{
+		super.GraphicLayer(win, par, name, id);
+		type = ltCoverRect;
+		hitType = htMask;
+		hitThreshold = 0;
+	}
+
+	function finalize()
+	{
+		super.finalize(...);
+	}
+
+	function internalOnMouseDown(x, y, button, processprovince = true)
+	{
+		// 内部関数
+		var provinceprocessed = false;
+		if(button == mbLeft && processprovince && !window.messageLayerHiding)
+			provinceprocessed = processProvince(x, y);
+		if(button == mbLeft && !provinceprocessed)
+		{
+            window.onPrimaryClick();
+		}
+		else if(button == mbRight)
+		{
+            window.onPrimaryRightClick();
+		}
+	}
+
+	function onMouseDown(x, y, button)
+	{
+		// マウスが押された
+		super.onMouseDown(...);
+		internalOnMouseDown(x, y, button);
+	}
+    
+	function assign(src)
+	{
+		// assign オーバーライド
+		super.assign(src);
+		assignVisibleState(src);
+	}
+
+	function atEndOfTransition(src, withchildren, exchange)
+	{
+		// atEndOfTransition オーバーライド
+		super.atEndOfTransition(...);
+		if(src == null)
+		{
+			//?背景レイヤがsrcなしでトランジション(children=true)
+			//　何もしなくてよいが、終了時に子レイヤは非表示になる。
+			//?背景レイヤがsrcなしでトランジション(children=false)
+			//　本当に何もしない。
+		}
+		else
+		{
+            super.assign(src);
+            exchangeInfo();
+            window.exchangeForeBack();
+            window.callExchangeInfo();
+            window.swapStageLayer(id);
+		}
+	}
+
+	function assignTransSrc()
+	{
+		// トランジションもと(comp)をコピーする
+		assign(comp);
+	}
+}
+// 调试先用这个方法吧 
+// 返回对于的服装+pose 仅决定图片，不决定位置参数 
+function getDress(layer){
+	if(layer.dress == "usual")
+		 return "和奏a_0_5"; 
+	return "和奏a_0_4"; // 直接返回图片
+}
+function getFace(layer){
+	return %[eye:"",mouse:""];
+}
+function getEye(layer){
+	var eye = layer.eye;
+	var dic=%[left:121,top:93,visible:1];
+	switch(eye){
+		case "open": dic.storage="和奏a_0_eye_open"; break;
+		case "close": dic.storage="和奏a_0_eye_close"; break;
+		case "half": dic.storage="和奏a_0_eye_half"; break;
+		default:
+			case "1": dic.storage="和奏a_0_900";
+			break;
+		case "2": dic.storage="和奏a_0_608"; break;
+		case "3": dic.storage="和奏a_0_627"; break;
+		case "4": dic.storage="和奏a_0_646"; break;
+		case "5": dic.storage="和奏a_0_704"; break;
+		case "6": dic.storage="和奏a_0_743"; break;
+		case "7": dic.storage="和奏a_0_781"; break;
+		case "8": dic.storage="和奏a_0_791"; break;
+		case "9": dic.storage="和奏a_0_810"; break;
+		case "10": dic.storage="和奏a_0_829"; break;
+	}
+	if(eye=="open"){
+		dic.actionList = [%[eye:%[handler:"StringPathAction",path:"open,half,close,half,open",time:2000]],%[eye:%[handler:"WaitAction",time:20000]],%[loop:true,point:2]];
+	}
+	return dic;
+}
+function getMouse(layer){
+	var dic = %[left:121,top:93,visible:1];
+	var storage = "和奏a_0_mouse_";
+	switch(layer.mouse){
+		 case void:case "":
+			storage+= "close"; break;
+		 default:
+			storage+= layer.mouse; break;
+
+	}
+	dic.storage = storage;//
+	dic.actionList = [%[mouse:%[handler:"StringPathAction",path:"o,i,a,,,u,a,a,e,u,o,o",time:1000]],%[mouse:%[handler:"WaitAction",time:2000]],%[loop:true,point:2]];
+	return dic;
+}
+function getFaceSyncParm(layer){
+	return %[left:20,top:10,width:260,height:215,zoom:100];
+}
+function getParts(layer,name){
+	var dic = %[left:121,top:93,visible:true,opacity:200];
+	switch(name){
+		case "hair":
+			dic.storage = "和奏a_0_23";
+			break;
+		default:
+			dic.storage = "和奏a_0_369";
+			dic.top=104;
+			dic.left=102;
+			dic.opacity=255;
+	}
+	return dic;
+}
+
+/*
+ 角色图层变化同步 部件变化 ，包括face 亮度，透明度 等等
+ 目前只会同步type绘制类型，亮度、伽马校正之类的以后再考虑 
+ */
+
+class CharacterLayer extends GraphicLayer //TODO 准备一个立绘解析类，全局唯一，专门用于获取立绘相关图片 
+{
+	// 前景レイヤ
+	var autoHide = false; // メッセージレイヤと一緒に隠れることができるか  是否和消息层一起隐藏
+	var invisibleByUser = false; // ユーザにより一時的に不可視 用户一时的隐藏
+    var visibleBeforeUserInvisible  = false;
+
+    var level; // 表示レベル補正用
+	var _chara;  // 角色 
+	var _dress; // 服装   
+	var _pose;  // 姿势差分
+	var _emotion;  // 面部表情
+	var _eye;  // 眼部表情
+	var _eyeLeft;  // 眼部x坐标
+	var _eyeTop;  // 眼部y坐标
+	var _mouse;  // 嘴部
+	var _mouseLeft;  // 嘴部x坐标
+	var _mouseTop;  // 嘴部y坐标
+
+	// 角色 服装和 姿势 可以决定 表情、嘴部的图片 
+	property chara {getter {return _chara;}}
+	property dress {getter {return _dress;}}
+	property pose  {getter {return _pose;}}
+	property emotion  {getter {return _emotion;}}
+
+	// 存储具体的层对象,动画可使用这些层对象 	
+	var eyeLayer;  // 面部表情
+	var mouseLayer;  // 嘴部
+	var partsLayer = %[]; // 其他部件
+
+	function CharacterLayer(win, par, name, id, level=0)
+	{
+        super.GraphicLayer(win, par, name, id);
+		eyeLayer = new global.AnimationLayer(win,this); 
+		mouseLayer = new global.AnimationLayer(win,this); 
+		eyeLayer.visible = mouseLayer.visible = true;
+		freeImage();
+		type = ltAlpha;
+		hitType = htMask;
+        hitThreshold = 64;
+		this.level = level; 
+	}
+
+	function finalize()
+	{
+		super.finalize(...);
+		invalidate eyeLayer;
+		invalidate mouseLayer;
+		_clearParts();
+	}
+
+	/** 
+	* @description: 用当前信息获取对应的立绘图片参数
+	* @param type	服装，表情，嘴部，或者部件
+	* @param elm	其他参数
+	* @param name	仅part使用该参数，部件名称
+	* @return 字典 立绘的图片的加载参数
+	*/
+	function _getImage(type,elm,name){
+		switch(type){
+			case "emotion": return getFace(this);	// 这个特别，用脸部表情获取对应的眼睛和嘴巴名称
+			case "dress": {	
+				var dic=%[];
+				(Dictionary.assign incontextof dic)(elm);	// 对于服装层作为主层要使用提供的加载参数
+				dic.storage = getDress(this);
+				return dic;
+			} 
+			case "eye": return  getEye(this); 
+			case "mouse": return  getMouse(this); 
+			case "part": return getParts(this,name);
+		}
+		return %[];
+	}
+
+
+	/** 
+	* @description: 重新加载部件，用当前立绘状态初始化部件（包括反转，缩放），正确定位部件
+	* @param layer	服装，表情，嘴部，或者部件
+	* @param elm	层加载参数参数
+	* @param obj	存储 初始化坐标的对象
+	* @param leftName	存储左坐标的属性名
+	* @param topName	存储上坐标的属性名
+	* @return 
+	*/
+	function _reloadLayer(layer,elm,obj,leftName,topName){
+		layer.loadImages(elm);
+		layer.setAffineOffset(AFFINEOFFSET_LEFT,AFFINEOFFSET_TOP);
+		obj[leftName]=elm.left;
+		obj[topName]=elm.top;
+		if(zoomx!=100)layer.zoomx = zoomx;
+		if(zoomy!=100)layer.zoomy = zoomy;
+		if(rotate!=0)layer.rotate=rotate;
+		layer.isFlipLR = isFlipLR;
+		layer.isFlipUD = isFlipUD;	
+		layer.type = type;
+		var realLeft = isFlipLR? width - elm.left - layer.width :obj[leftName];
+		var realTop  = isFlipUD? height - elm.top - layer.height:obj[topName];
+		var temp = getAffinePosition(realLeft,realTop);
+		layer.left= temp.x;
+		layer.top = temp.y;
+	}
+
+	function _reloadEye(e,startAction = false){
+		if(_eye == e)return;
+		_eye = e;
+		if(isBlank(_eye))
+			eyeLayer.freeImage();
+		else{	
+			var temp =_getImage("eye");
+			_reloadLayer(eyeLayer,temp,this,"_eyeLeft","_eyeTop");	// 以当前主层配置做调整
+			if(startAction && !isBlank(temp.actionList))
+				addAction("eye",true,temp.actionList);
+		}
+	}
+
+	function _reloadMouse(m,startAction = false){
+		if(_mouse == m)return;
+		_mouse = m;
+		if(isBlank(_mouse))
+			mouseLayer.freeImage();
+		else{	
+			var temp =_getImage("mouse");
+			_reloadLayer(mouseLayer,temp,this,"_mouseLeft","_mouseTop");	// 以当前主层配置做调整
+			if(startAction && !isBlank(temp.actionList))
+				addAction("mouse",true,temp.actionList);
+		}
+	}
+
+	/** 
+	* @description: 重新设置所有部件的位置
+	* @return 	将所有部件设置到正确的立绘贴图位置上
+	*/
+	function _resetPartsPosition(){
+		var temp;
+		if(!isBlank(eyeLayer)){ 
+			var realLeft = isFlipLR? width - _eyeLeft - eyeLayer.width :_eyeLeft;
+			var realTop  = isFlipUD? height - _eyeTop - eyeLayer.height:_eyeTop;
+			var temp = getAffinePosition(realLeft,realTop);
+			eyeLayer.left= temp.x;
+			eyeLayer.top = temp.y;
+		}
+		if(!isBlank(mouseLayer)){
+			var realLeft = isFlipLR? width - _mouseLeft - mouseLayer.width :_mouseLeft;
+			var realTop  = isFlipUD? height - _mouseTop - mouseLayer.height:_mouseTop;
+			var temp = getAffinePosition(realLeft,realTop);
+			mouseLayer.left= temp.x;
+			mouseLayer.top = temp.y;
+		}
+		foreach(partsLayer,function(k,v){
+			var layer = v.layer;
+			var realLeft = isFlipLR? width - v.left - layer.width : v.left;
+			var realTop  = isFlipUD? height - v.top - layer.height: v.top;
+			var temp = getAffinePosition(realLeft,realTop);
+			layer.left= temp.x;
+			layer.top = temp.y;
+		} incontextof this);
+	} 
+
+	function _clearParts(){
+		foreach(partsLayer,function(k,v){
+			invalidate v.layer;
+			invalidate v;
+		});
+		partsLayer = %[];
+	}
+
+	/** 
+	* @description: loadImages时会调用此方法(写在affinelayer)
+	* 重新设置所有部件的属性，将所有部件设置到正确的立绘贴图位置上
+	* @return 	
+	*/
+	function reset(){
+		super.reset();
+		_updateProperty("type",type);
+		_updateProperty("rotate",rotate);
+		_updateProperty("zoomx",zoomx);
+		_updateProperty("zoomy",zoomy);
+		_updateProperty("isFlipLR",isFlipLR);
+		_updateProperty("isFlipUD",isFlipUD);
+		_resetPartsPosition();  
+	}
+
+	// 这俩属性可以用于做部件的切换动画
+	property eye  {
+		getter {return _eye;}
+		setter(e){
+			_reloadEye(e);
+		}	
+	}
+	property mouse {
+		getter {return _mouse;}
+		setter (m){
+			_reloadMouse(m);
+		}	
+	}
+	// 目前没有做部件动画的打算
+
+	
+	/** 
+	* @description:  index，left，top，opacity 这些属性 只能作用于主层的服装，但大部分属性都会同时生效于部件
+	* @param elm 		图像的加载属性
+	* @param elm.chara	角色名		
+	* @param elm.dress	服装名
+	* @param elm.pose	姿势名
+	* @param elm.emotion	表情名
+	* @param elm.eye	眼睛名
+	* @param elm.mou	嘴巴名
+	* @param elm.parts	部件名(列表)
+	* @param elm.keep=true		是否保持原有部件
+	* @return 
+	*/
+	function setStandView(elm){
+		with(elm){
+			.keep = true if(isBlank(.keep));
+			if(.keep){
+				.chara = chara if(isBlank(.chara));
+				.dress = dress if(isBlank(.dress));
+				.pose = pose if(isBlank(.pose));
+
+				.emotion = emotion if(isBlank(.emotion));
+				.eye = eye if(isBlank(.eye));
+				.mouse = mouse if(isBlank(.mouse));
+				.parts = getObjectKeys(partsLayer) if(isBlank(.parts));
+			}
+
+			if(.chara!=chara || .dress!=dress || .pose != pose){ // 重载服装
+				_chara = .chara,_dress = .dress, _pose = .pose;
+				this.loadImages(_getImage("dress",elm));	// 重新加载时会调用reset方法
+			}
+			
+			if(.emotion!=emotion){ // 重载表情
+				_emotion = .emotion;
+				var temp = _getImage("emotion");	// 表情就是 直接操作 眼睛+嘴
+				.eye = temp.eye;
+				.mouse = temp.mouse;
+			}
+			if(.eye!=eye){	
+				delAction("eye");
+				_reloadEye(.eye,true);
+			}
+
+			if(.mouse!=mouse){
+				delAction("mouse");	// 每次切换 停止嘴巴动画
+				_reloadMouse(.mouse,true);
+			}
+			if(!arrCompare(.parts,getObjectKeys(partsLayer))){
+				_clearParts();
+				if(!isBlank(.parts)){
+					for(var i=0;i<.parts.count;i++){
+						var part = partsLayer[.parts[i]] = %[]; // 所有信息存到这个字典中
+						part.layer = new global.AnimationLayer(window,this); 
+						_reloadLayer(part.layer,_getImage("part",elm,.parts[i]),part,"left","top");
+						// 如果做部件动画可以放到这里 
+					}
+				}
+			}
+			if(.syncface)syncFace();
+		}
+	}
+	function syncFace(){
+		var elm = getFaceSyncParm(this);
+		var tmp = window.temporaryLayer;
+		tmp.type =ltAlpha;
+		tmp.face = dfAuto;
+		tmp.setSize(elm.width,elm.height);
+		tmp.piledCopy(0,0,this,elm.left,elm.top,elm.width,elm.height);
+		var fl = window.current.faceLayer;
+		if(!isBlank(fl))with(tmp){
+			fl.stretchCopy(0,0,fl.width,fl.height,tmp,0,0,.width,.height,stLinear);
+			fl.visible = true;
+		}
+	}
+	function _updateProperty(propertyName,value){
+		super[propertyName] = value;
+		eyeLayer[propertyName] = value if(!isBlank(eyeLayer));
+		mouseLayer[propertyName] = value if(!isBlank(mouseLayer));
+		foreach(partsLayer,function(k,v,dic,name,value){
+			v.layer[name] = value;
+		},propertyName,value);
+	}
+	/// 回転量（度）
+    property rotate {
+        setter(v) {
+			if(super.rotate == v)return;
+           	_updateProperty("rotate",v);
+			_resetPartsPosition();
+        }
+        getter() {
+            return super.rotate;
+        }
+    }
+    
+
+    /// 立绘整体缩放
+    property zoomx {
+        setter(v) {
+			if(zoomx == v)return;
+			super.zoomx = v;
+			_updateProperty("zoomx",v);
+			_resetPartsPosition();
+        }
+        getter() {
+            return super.zoomx;
+        }
+    }
+    
+    /// 立绘整体缩放
+    property zoomy {
+        setter(v) {
+			if(zoomy == v)return;
+			_updateProperty("zoomy",v);
+			_resetPartsPosition();
+        }
+        getter() {
+            return super.zoomy;
+        }
+    }
+    
+	
+    property zoom {
+        setter(v) {
+			this.zoomx = this.zoomy = v;
+        }
+    }
+
+	property type {
+        setter(v) {
+			_updateProperty("type",v);
+        }
+        getter() {
+            return super.type;
+        }
+    }
+
+	property isFlipLR {
+		getter{
+			return super.isFlipLR;
+		}
+		setter(v){
+			_updateProperty("isFlipLR",v);
+			_resetPartsPosition();
+		}
+        
+    }
+
+    property isFlipUD {
+        getter{
+			return super.isFlipUD;
+		}
+		setter(v){
+			_updateProperty("isFlipUD",v);
+			_resetPartsPosition();
+		}
+    }
+
+	
+    function doBoxBlur(xblur=1, yblur=1) {
+        super.doBoxBlur(...);
+        eyeLayer.doBoxBlur(...) if(!isBlank(eyeLayer));
+        mouseLayer.doBoxBlur(...) if(!isBlank(mouseLayer));
+		foreach(partsLayer,function(k,v,dic,x,y){
+			v.layer.doBoxBlur(x,y);
+		},xblur,yblur);
+    }
+
+    function doGrayScale() {
+        super.doGrayScale();
+        eyeLayer.doGrayScale() if(!isBlank(eyeLayer));
+        mouseLayer.doGrayScale() if(!isBlank(mouseLayer));
+		foreach(partsLayer,function(k,v){
+			v.layer.doGrayScale();
+		});
+    }
+
+
+	function onHitTest(x, y, hit)
+	{
+		// onHitTest オーバーライド
+		if(!hit || provinceActions === void)
+		{
+			// hit==false または領域アクションが定義されていない場合
+			super.onHitTest(x, y, false);
+		}
+		else
+		{
+			// hit==true かつ 領域アクションが定義されている場合
+			super.onHitTest(x, y, !window.messageLayerHiding);
+		}
+		return;
+	}
+
+	function assign(src)//TODO 渐变之后的复制需要改掉
+	{
+		// assign オーバーライド
+		mouseLayer.assign(src.mouseLayer);
+		eyeLayer.assign(src.eyeLayer);
+		_clearParts();
+		foreach(src.partsLayer,function(k,v){
+			partsLayer[k] = %[];
+			partsLayer[k].layer = new global.AnimationLayer(window,this); 
+			partsLayer[k].layer.assign(v.layer);
+			partsLayer[k].layer.assignVisibleState(v.layer);
+			partsLayer[k].left = v.left;
+			partsLayer[k].top = v.top;
+		} incontextof this);
+
+		_chara = src._chara;  // 角色 
+		_dress = src._dress; // 服装   
+		_pose = src._pose;  // 姿势差分
+		_emotion = src._emotion;  // 面部表情
+		_eye = src._eye;  // 眼部表情
+		_eyeLeft = src._eyeLeft;  // 眼部x坐标
+		_eyeTop = src._eyeTop;  // 眼部y坐标
+		_mouse = src._mouse;  // 嘴部
+		_mouseLeft = src._mouseLeft;  // 嘴部x坐标
+		_mouseTop = src._mouseTop;  // 嘴部y坐标
+
+		super.assign(src);
+		assignVisibleState(src);	// 这里保证了复制位置，可见信息 透明度和高度
+		// 親クラスの assign は可視?不可視などの情報をコピーしないため
+		// ここで assignVisibleState を呼ぶ必要がある
+        autoHide = src.autoHide;
+        level = src.level;
+	}
+
+	function setOptions(elm)
+	{
+		// setOptions オーバーライド
+        super.setOptions(elm);
+        autoHide = +elm.autohide if elm.autohide !== void;
+	}
+
+	function atEndOfTransition(src, withchildren, exchange)
+	{
+		// atEndOfTransition オーバーライド
+		super.atEndOfTransition(...);
+		if(src == null)
+		{
+			//?メッセージレイヤ、前景レイヤが、srcなしでトランジション (children=true)
+			//　何もしなくてよいが、終了後それらの子レイヤは自動的に非表示になる。
+		}
+		else
+		{
+			//?メッセージレイヤ、前景レイヤが、srcありでトランジション (children=true)
+			//　重要な情報をトランジション元と交換、exchange=false の場合はさらに
+			//　トランジション元の情報をトランジション先にコピー。ただし、このコピーの際に
+			//　ウィンドウの可視?不可視の情報はコピーしない。
+			// 存在子层时的渐变，复制信息到交互的层中，但并不复制可见不见的信息
+			super.assign(src);
+			exchangeInfo();
+			window.swapCharacterLayer(id);
+		}
+	}
+
+	function assignTransSrc()
+	{
+		// トランジションもと(comp)をコピーする
+		assign(comp);
+	}
+
+	function setHiddenStateByUser(b)//用户右击隐藏
+	{
+		// ユーザが右クリックなどでメッセージレイヤを一時的に隠すときに
+		// 呼ばれる
+		if(autoHide)
+		{
+			if(b)
+			{
+				visibleBeforeUserInvisible = visible;
+				invisibleByUser = true; // ユーザにより一時的に不可視
+				visible = false;
+			}
+			else
+			{
+				invisibleByUser = false; // 可視
+				visible = visibleBeforeUserInvisible;
+			}
+		}
+	}
+
+	function onMouseDown(x, y, button)
+	{
+		// マウスが押された
+		super.onMouseDown(...);
+		if(button == mbLeft)
+			processProvince(x, y);
+		else if(button == mbRight)
+			window.onPrimaryRightClick();
+			// 右ボタンは window.onPrimaryRightClick() を呼ぶ
+	}
+
+	function store() 
+	{
+		// store オーバーライド
+		var dic = super.store();
+        dic.autoHide = autoHide;
+        dic.level    = level;
+
+		dic.chara = _chara;  
+		dic.dress =_dress;  
+		dic.pose = _pose;  
+		dic.emotion =_emotion;  
+		dic.eye = _eye;  
+		dic.mouse = _mouse;
+		dic.eyeLeft = _eyeLeft;  // 眼部x坐标
+		dic.eyeTop = _eyeTop;  // 眼部y坐标
+		dic.mouseLeft = _mouseLeft;  // 嘴部x坐标
+		dic.mouseTop = _mouseTop;  // 嘴部y坐标
+
+		if(!isBlank(eyeLayer))dic.eyeLayer = eyeLayer.store();
+		if(!isBlank(mouseLayer))dic.mouseLayer = mouseLayer.store();
+		dic.partsLayer = %[];
+		foreach(partsLayer,function(k,v,dic,param){
+			param[k] = v.layer.store();
+			param[k].origLeft = v.left;
+			param[k].origTop = v.top;
+		},dic.partsLayer);
+        return dic;
+	}
+	
+	function restore(dic)
+	{	
+		// restore オーバーライド
+		with(dic){
+			autoHide = +.autoHide if .autoHide !== void;
+			level    = +.level if .level !== void;
+
+			_chara=.chara;  
+			_dress=.dress;  
+			_pose=.pose;  
+			_emotion=.emotion;  
+			_eye=.eye;  
+			_mouse=.mouse;
+
+			_eyeLeft = dic.eyeLeft;  // 眼部x坐标
+			_eyeTop = dic.eyeTop;  // 眼部y坐标
+			_mouseLeft = dic.mouseLeft;  // 嘴部x坐标
+			_mouseTop = dic.mouseTop;  // 嘴部y坐标
+
+			if(!isBlank(.eyeLayer))
+				eyeLayer.restore(.eyeLayer);
+			if(!isBlank(.mouseLayer))
+				mouseLayer.restore(.mouseLayer);
+			
+			_clearParts();
+			if(!isBlank(.partsLayer)){
+				foreach(.partsLayer,function(k,v){
+					var dic = partsLayer[k] = %[];
+					dic.layer = new global.GraphicLayer(window,this); 
+					dic.layer.restore(v);
+					dic.left = v.origLeft;
+					dic.top  = v.origTop;
+				}incontextof this);
+			}
+		}
+		super.restore(dic); // 这里调整各种属性会同时改变子层
+		_resetPartsPosition(); // zoom之类的属性会在父层中恢复
+	}
+}

@@ -1,0 +1,556 @@
+// ----------------------------------------------------------------------------
+// セーブロード画面用クラス
+
+class SaveLoadBase extends PageSheet
+{
+	var mode ="load";		//当前的模式 load/save
+	var _copying =false, _moving = false;	//	是否正在移动/复制
+	var _targetNum;
+	var template = ["item","edit","protect","copy","move","delete","thumb"];	// 用于复制的模板按钮
+	function SaveLoadBase(elm = %[]) {
+		super.PageSheet(elm);
+		kag.addHook("onSaveBookMark",onSave);
+		kag.addHook("rightClick",onRightClick);
+		page = (elm.page !== void) ? +elm.page : lastPage;
+	}
+	function finalize() {
+		if(isBlank(global,"kag") || isBlank(this))return;
+		super.finalize(...);
+		kag.removeHook("rightClick",onRightClick);
+		kag.removeHook("onSaveBookMark",onSave);
+	}
+
+	function onPageChanged(old, now) {
+		super.onPageChanged(...);
+		lastPage = now;
+	}
+	property lastPage {
+		getter { return (int)+sf.loadpage; }
+		setter(v) {           sf.loadpage = (int)+v; }
+	}
+	property lastSaved {
+		getter { return sf.lastsaved; }
+		setter(v) {     sf.lastsaved = v; }
+	}
+
+	function drawItem(name,num, target) {
+		num = getDataNumber(num);
+		var info = _getItemInfo(num);
+		drawBookMark(num,info,name,target);
+	}
+	/** abstract
+	* @description: 绘制单个存档格
+	* @param num	存档编号(实际编号)
+	* @param info	存档信息
+	* @param name	存档格的部件的名称 
+	* @param target	绘制目标层 
+	*/
+	function drawBookMark(num,info,name,target){
+		if(isBlank(info))
+			target.visible = false;
+		else target.visible=true;
+		switch(name){
+			case "thumb":
+				if(!isBlank(info,"thumbnail"))
+					target.loadButtons(info.thumbnail);
+				break;
+			case "item":
+				target.visible=true;
+				target.enabled = isEnabled(num);
+				break;
+			case "protect":
+				if(!isBlank(kag.bookMarks[num]) && kag.bookMarks[num].protectedStates)
+					target.toggle = true;
+				else target.toggle = false;
+				break;
+			//default: target.visible=false;
+		}
+	} 
+
+	// 存档的编号变换为实际系统的编号
+	function getDataNumber(num) { return page * per +num; }
+	// 控件的编号 变换为 存档的编号
+	
+
+	// セーブファイルの情報を得る
+	function _getItemInfo(datanum) {
+		if (!isExistData(datanum)) return %[];
+
+		kag.updateBookMarkInfo(datanum);
+		
+		var info = kag.bookMarks[datanum];
+		var time = info.playTime;
+		var h = ((+time \ 1000) \ 60 ) \ 60;
+		var m = ((+time \ 1000) \ 60 ) % 60;
+
+		var ret = %[]; // BookMarkInfoをretへコピー
+		(Dictionary.assign incontextof ret)(info, true) if (info !== void);
+
+		ret.thumbnail = kag.getBookMarkFileNameAtNum(datanum);
+		ret.title     = info.name;
+		ret.realdate  = info.date;
+		ret.playtime  = info.playTime;
+		ret.playtime_hour = h;
+		ret.playtime_min  = m;
+		ret.lastsaved = (lastSaved === (int)datanum);
+		return ret;
+	}
+	// 是否存在存档
+	function isExistData(num) {
+		return Storages.isExistentStorage(kag.getBookMarkFileNameAtNum(num));
+	}
+	function isLastSaved(pos) {
+		return isExistData(pos) && (lastSaved === (int)getDataNumber(pos));
+	}
+	// 该存档是否可操作，不为空，且不被保护,或移动和复制选中了此项目
+	function isEnabled(num) {
+		if(isBlank(num)) return false;
+		if(!isBlank(_targetNum)){	//正在复制或移动
+			if(isBlank(kag.bookMarks[num]))return true;
+			if(_targetNum == num) return false;
+			return !kag.bookMarks[num].protectedStates;
+		}	
+		else if(mode == "save"){
+			if(isBlank(kag.bookMarks[num]))return true;
+			return !kag.bookMarks[num].protectedStates;
+		}else if(mode == "load"){
+			if(!isExistData(num)) return false;
+			else return true;
+		}
+	}
+	// 复制和移动存档
+	function _operateBookMark(srcnum = _targetNum, dstnum) {
+		Plugins.link("fstat.dll") if (typeof Storages.deleteFile != "Object");
+		var get    = kag.getBookMarkFileNameAtNum;
+		var from   = get(srcnum);
+		var to     = get(dstnum);
+		kag.bookMarks[dstnum] = kag.bookMarks[srcnum];
+		if(_copying)
+			Storages.copyFile(from,to,false);
+		else if(_moving) {
+			Storages.moveFile(from,to);
+			kag.bookMarks[srcnum] = %[];
+		}
+		kag.flushAutoPath();
+	}
+
+	function redrawItem(num){
+		var items = _itemList[num];
+		foreach(items,function(k,v,dic,num){
+			drawItem(k,num,v);
+		}incontextof this,num);
+	}
+	
+	function onSelect(target){
+		var num = target.number;
+		num = getDataNumber(num);
+		if(_copying){
+			askYesNo("AskCopy", "confirm", onCopy,, num);
+		}else if(_moving){
+			askYesNo("AskCopy","confirm",onMove,,num);
+		}
+		else if(mode == "save"){
+			lastSaved = +num;
+			return kag.saveBookMarkWithAsk(num); 
+		}
+		else if(mode == "load"){
+			kag.loadBookMarkWithAsk(num);
+			// askYesNo("AskLoad","confirm",SystemAction.doload,,num);
+		}
+	}
+
+	function onRightClick(x, y, button, shift){// 右击取消复制移动状态
+		if(_copying || _moving){
+			_copying = _moving = false;
+			updateItem();
+			return true;
+		}
+	}
+	// kag的hook  hook接受到的是真实的编号
+	function onSave(datanum){	
+		var num = datanum - per;
+		redrawItem(num);
+	}
+
+	function remove(num){	// num: 控件编号
+		askYesNo("remove", "confirm",onRemove,void,num);
+	}
+
+	function onRemove(num) {// num: 控件编号
+		var datanum = getDataNumber(num);
+		if (lastSaved === (int)datanum) lastSaved = void;
+		kag.eraseBookMark(datanum);
+		var fn = kag.getBookMarkFileNameAtNum(datanum);
+		if (!isBlank(fn)) {
+			Plugins.link("fstat.dll") if (typeof Storages.deleteFile != "Object");
+			Storages.deleteFile(fn);
+			kag.flushAutoPath();
+		}
+		redrawItem(num);
+	}
+	function protect(num){
+		askYesNo("AskProtect", "confirm", onProtect,void,num);
+	}
+	function onProtect(num){
+		var datanum = getDataNumber(num);
+		kag.setBookMarkProtectedState(datanum,!!kag.bookMarks[datanum].protectedStates);
+		redrawItem(num);
+	}
+	function beginCopy(num){
+		_targetNum = getDataNumber(num);
+		_copying = true;
+		/*var item = _itemList[num].item;
+		if(!isBlank(item)){
+			item.Butt_mouseDown = true;
+			item.update();
+			item.enabled = fasle;
+		}*/
+		updateItem();
+	}
+	function onCopy(num){
+		var src = _targetNum;
+		// kag.setBookMarkProtectedState(datanum,!!kag.bookMarks[datanum].protectedStates);
+		_operateBookMark(src,num);
+		_copying = false;
+		_targetNum = void;
+		updateItem();
+	}
+	function beginMove(num){
+		_targetNum = getDataNumber(num);
+		_moving = true;
+		updateItem();
+	}
+
+	function onMove(num){
+		var src = _targetNum;
+		_operateBookMark(src,num);
+		_moving = false;
+		_targetNum = void;
+		updateItem();
+	}
+
+
+	function comment(num) { // num是控件编号
+		num = (int)getDataNumber(num);
+		if(!isExistData(num))return;
+		var info = kag.bookMarks[num];
+		var text = onEditComment(info);
+		dm("debug:comment:"+text);
+		if (text !== void) {
+			kag.bookMarks[num].comment = text;
+			redrawItem(getItemNumber(num));
+		}
+	}
+	function onEditComment(info) { // 編集決定されたらstring/キャンセル時はvoidを返すこと
+		var comment = SystemLanguage.getScenarioText(,info.lastTextStorage,info.lastTextNum).text;
+		if(!isBlank(info.comment))
+			comment = info.comment;
+		return EditCommentText(@"コメントを編集", comment);
+	}
+
+	function disableClickable() { SystemHook.disableClickable(); }	// todo 待实现
+
+	function  enableClickableAndWait() {
+		kag.unlockMessageLayerSelProcess();
+		kag.process(,"*page_done",, true); 
+	}
+}
+
+function EditCommentText(caption, text, title = System.title, cls="EditCommentDialog") {
+	if (typeof global[cls] == "undefined") {
+		try {
+			KAGLoadScript("win32dialog.tjs");
+			KAGLoadScript("editcomment.tjs");
+		} catch {
+			global[cls] = null;
+		}
+	}
+	if (typeof global[cls] == "Object" && global[cls]) {
+		try {
+			var dialog = new global[cls](title, caption, text);
+			var ret = dialog.open(kag);
+			invalidate dialog;
+			return ret;
+		} catch(e) {
+			dm(e.message);
+			global[cls] = null;
+		}
+	}
+	return System.inputString(title, caption, text);
+}
+
+class ScrollSaveLoadBase extends SaveLoadBase
+{	
+	var _isHorz = true;	// 是否横向滚动
+	var _pageStep;	// 滚动步长,点击下一页时滚动的长度
+	var _scroll = 0;	// 滚动位置
+	var _scrollMax;	// 最大滚动长度
+	var _scrollMin = 0;	// 最小滚动位置
+	var scrollTime = SystemConfig.UiAnimeTime;
+	function ScrollSaveLoadBase(elm = %[]){
+		super.SaveLoadBase(elm);
+		_isHorz = elm.isHorz if(!isBlank(elm.isHorz));
+		 if(!isBlank(elm.pageStep))
+			_pageStep = elm.pageStep;
+		else _pageStep = pageSize;
+	}
+	property page {
+		getter()  { return _scroll \ pageSize; }
+		setter(v) {
+			if ( v < 0) v =  0;
+			else if (v >= _max) v = _max-1;
+			if (page !== v) {
+				// onPageChange(_page, v);
+				// _page <-> v;
+				var scrollDest = page * pageSize;
+				scroll = scrollDest;
+				// onPageChanged(v, _page);
+			}
+		}
+	}
+
+	property pageSize{	// 一页的滚动大小
+		getter{
+			return _isHorz? _xOffset*_col :_yOffset*_row;
+		}
+	}
+	property scrollMax{
+		getter{
+			if(isBlank(_scrollMax))
+				return (_max-1) * pageSize ;
+			else return _scrollMax;
+		}
+		setter(v){
+			var max = _max * pageSize;
+			if( max < v)v = max;
+			if(v < scrollMin) v = scrollMin;
+			_scrollMax = v;
+			//	更改scroll 会自动调用updateslider，所以省略
+			if(_scrollMax< scroll )scroll = _scrollMax;
+			else updateSlider();
+		}
+	}
+	property scrollMin{
+		getter{
+			if(isBlank(_scrollMin)) return 0;
+			return _scrollMin;
+		}
+		setter(v){
+			if(v < 0) v=0;
+			if(v > scrollMax) v=scrollMax;
+			_scrollMin = v;
+			if(_scrollMin> scroll )scroll = _scrollMin;
+			else updateSlider();
+		}
+	}
+	var _ignoreSlider = false;
+	property scroll{
+		getter(){
+			return _scroll;
+		}
+		setter(v){
+			if(!canScroll)return;
+			if(v>scrollMax) v = scrollMax;
+			if(v<scrollMin) v = scrollMin;
+			if(_scroll == v) return;
+			_scroll = v;
+			updateSlider();
+			updateButton();
+			updateItem();
+		}
+	}
+	property canScroll     { getter { return scroll<scrollMax || scroll>scrollMin; } }
+	property canScrollUp   { getter { return scroll>scrollMin; } }
+	property canScrollDown { getter { return scroll<scrollMax; } }
+	property start{// 当前滚动位置开始的第一个存档编号
+		getter{ return  (_scroll \ (_isHorz ? _xOffset : _yOffset)) * (_isHorz ? _row : _col);	}
+	}
+	function _stopScroll(){
+		owner.delAction("scroll");
+	}
+	function _startScroll(from = scroll,to){
+		scroll = from;
+		owner.addAction("scroll",true,[%["action.scroll"=>%[handler:MoveAction,value:to,time:scrollTime]]]); 
+	}
+	// 存档的编号变换为实际系统的编号
+	function getDataNumber(num) { return start +num; }
+	function getItemNumber(num) { return num - start; }
+	function updateItem(){
+		var col = _isHorz ? _col +1 :_col;
+		var row = _isHorz ? _row :_row +1;
+		var scrollOffset = scroll % (_isHorz ? _xOffset : _yOffset);
+		for(var i=0;i<col;i++){
+			for(var j=0;j<row;j++){
+				var num = _isHorz ? (row * i + j) : (col * j + i);
+				if(isBlank(_itemList[num]))_itemList[num] = %[];
+				var links = _itemList[num];
+				for(var z = 0;z < template.count ; z++){
+					var itemName = template[z];
+					var newName = itemName +(string)num;
+					if(isBlank(owner.names[itemName]))continue;	// 无此控件跳过
+					
+					var base = owner.names[itemName];
+					var basex = base.left,basey = base.top; 
+					var lay = owner.names[newName];
+					if(isBlank(lay))	// 未生成则生成控件
+					{
+						owner.copyLink(itemName,newName);
+						lay = owner.names[newName];
+						links[itemName] = lay;
+					}
+					if(_isHorz)
+						lay.setPos(basex + i *_xOffset -scrollOffset,basey + j * _yOffset);
+					else 
+						lay.setPos(basex + i *_xOffset ,basey + j * _yOffset -scrollOffset);
+					lay.number = num;	// 记录在此类中保存的编号 
+					drawItem(itemName,num,lay);
+				}
+			}
+		}
+	}
+		
+	function updateSlider() {		// 更新滚动条属性
+		_ignoreSlider = true;
+		var slider = owner.names.slider; 
+		if(isBlank(slider))return;
+		slider.enabled = canScroll;
+		slider.min = scrollMin;
+		slider.max = scrollMax;
+		slider.step = _pageStep;
+		slider.position = scroll;
+		_ignoreSlider = false;
+	}
+}
+/*
+// ----------------------------------------------------------------------------
+// スクロール可能版EditableStore (要/scrollutil.tjs)
+
+class        EditableStoreScroll extends EditableStoreBase { // スクロール・編集機能を再利用するための共通クラス
+	function EditableStoreScroll(view, elm, *) {
+		KAGLoadScript("scrollutil.tjs") if (typeof global.ScrollableSheetUtil == "undefined");
+		scutil = new ScrollableSheetUtil(this, elm);
+		super.EditableStoreBase(view, elm, *);
+	}
+	function finalize {
+		if (scutil) invalidate scutil;
+		scutil = void;
+		super.finalize(...);
+	}
+
+	var scutil;
+	function update(redraw) {
+		if (scutil) {
+			onStateChanged("update", void, redraw);
+			return scutil.update(...);
+		}
+		return super.update(...);
+	}
+	function onKeyDown(key, shift) { return (scutil && scutil.onKeyDown(...)) || super.onKeyDown(...); }
+
+	// proxys
+	property offset { getter { return scutil ? scutil.offset : super.offset; } }
+	property itemCountPerPage { getter { return scutil ? scutil.itemCountPerPage : super.itemCountPerPage; } }
+
+	function replaceScrollItemButtons { if (scutil) scutil.replaceScrollItemButtons(...); }
+	function getItemButtonTag(n) { return scutil ? scutil.getItemButtonTag(...) : super.getItemButtonTag(...); }
+	
+
+	function forceRedrawItem(num) {
+		if (scutil) scutil.clearItemCache(num);
+		return super.forceRedrawItem(...);
+	}
+
+	var _newiconInItem;
+	function setNewIconPos(newicon, target) {
+		if (!newicon) return;
+		if (!_newiconInItem && scutil && scutil.scrollBaseLayer) {
+			var base =                   scutil.scrollBaseLayer;
+			if (_newiconInItem === void && target) {
+				_newiconInItem = (ncox>= 0 && ncox+newicon.width  <= target.width &&
+								  ncoy>= 0 && ncoy+newicon.height <= target.height);
+				if (_newiconInItem) {
+					newicon.parent = base;
+					return super.setNewIconPos(...);
+				} else {
+					newicon.absolute = base.absolute+1;
+				}
+			}
+			with (base) return super.setNewIconPos(newicon, target, ncox+.left, ncoy+.top);
+		}
+		return super.setNewIconPos(...);
+	}
+
+	function onSetupItemButtonOne(elm, idx) {
+		elm.exp = @'Current.cmd("select/${idx}")';
+	}
+
+	// callback from scutil
+	function onScroll {
+		showNewIcon(void);
+	}
+	// callback from scutil
+	function onScrollItem(item, n, pos) {
+		_forceLeaveItem(item);
+		if (isLastSaved(offset+n)) showNewIcon(item);
+		var x=item.left, y=item.top;
+		// [XXX] 縦横モード判定
+		if (!scutil._isHorz) y=pos;
+		else                 x=pos;
+		foreachSysBtnList(function (info, item, n, x, y) {
+			var info = getSysBtnInfo(info.tag);
+			setSystemButtonPos(info.tag, n, x, y);
+		} incontextof this, item, n, x, y);
+	}
+	function _forceLeaveItem(item) {
+		if (item && typeof item.Butt_mouseOn != "undefined" && item.Butt_mouseOn) item.onMouseLeave(); // [XXX]
+	}
+	function _recheckEnterItem() {
+		with (kag.primaryLayer) {
+			var lay = .getLayerAt(.cursorX, .cursorY);
+			if (lay && lay.enabled) {
+				var n = scutil.getItemButtonIndex(lay);
+				if (n !== void) lay.onMouseEnter();
+			}
+		}
+	}
+	// callback from scutil
+	function onScrollUpdate() {
+		scutil.clearItemCacheRange();
+		updateEditButton();
+	}
+	// callback from scutil
+	function onScrolled(pos, doneAct) {
+		var step = scutil.roundedStep;
+		setLastScrollPos(pos \ step);
+		super.page = scutil.getCurrentPage();
+		if (doneAct) _recheckEnterItem();
+	}
+
+	function setupUiRects(ui) {
+		_newiconInItem = void;
+		if (scutil) with (scutil) {
+			.setup(ui);
+			var pos = getLastScrollPos();
+			if (pos !== void) {
+				.setScrollPos(pos*(.roundedStep\.blockStep), false);
+			}
+			// .setCurrentPage(super.page);
+		}
+	}
+	function jumpPageScroll(pg) {
+		if (scutil) with (scutil) .fixSliderScroll(.getPagePos(pg)); //int(+pg) * .row * .blockStep);
+	}
+
+	function getLastScrollPos()    {} // return sf.lastSaveDataScrollPos;
+	function setLastScrollPos(pos) {} //        sf.lastSaveDataScrollPos = pos;
+
+	property page {
+		getter { return scutil ? scutil.getCurrentPage() : super.page; }
+		setter(v) {
+			//dm("prop:page", v);
+			if (scutil) scutil.setCurrentPage(v);
+			super.page = v;
+		}
+	}
+}
+*/

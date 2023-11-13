@@ -1,0 +1,23 @@
+with (SystemConfig) {
+	.SystemDefaultFontColor = 0x591515;
+    // ヘルプチップ文字描画
+	.helpTextDrawOption = %[
+		/**/color:0x591515, halign:-1, valign:0,
+		/**/fontface:"宋体", fontheight: 15, linestep:20,
+//		/**/param:[255, true, 1536, 0xffd198, 1, 0, 0 ]
+
+		// [XXX] 記号画像表示差し替え
+		/**/chsep:true, drawtext:function(layer, x,y,text,*) {
+			switch (text) {
+			case $9654:
+			case $9664:
+				var tmp = layer.window.temporaryLayer;
+				tmp.loadImages("helpmark_"+ #text);
+				layer.operateRect(x,y,tmp,0,0,tmp.imageWidth,tmp.imageHeight);
+				break;
+			default:
+				return layer.drawText(x,y,text,*);
+			}
+		} incontextof null
+		];
+}

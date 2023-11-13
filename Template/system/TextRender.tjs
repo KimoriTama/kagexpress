@@ -1,0 +1,996 @@
+/**
+ * 这个插件就是为了在渲染文字的时候能为每个文字指定不同的附带信息，比如颜色，绘制下一个字等待的延迟，对齐方式，阴影颜色 斜体之类的
+ * 	文字渲染的类 提供在矩形内绘制文字的功能
+ *  注意事项
+ * 	不要在绘制中途改变对齐方式 align，绘制方向 vertical
+ *	指定ruby字符的位置为上溢的位置，为最大大小的文字的上端为的0位置
+ *  多语言模式下为了正确估计文字占用大小，所有的换行换页都必须预先由此类知晓，所以无法在文字间夹杂指令 
+ * 入力用特殊テキスト書式		输入的特殊字符的写法
+ * \n      改行		换行
+ * \t      タブ文字		tab字符
+ * \文字   エスケープ指定。特殊機能が無効	指定escape文字，
+ * [xxxx]  ルビ指定。次の文字にかかる		ruby文字，加在下个文字上
+ * [xxxx,文字数]  ルビ指定。次の指定した個数の複数の文字にかかる	指定ruby文字，加在下次的n个文字上
+ *
+ * フォント指定		指定字体
+ * %f名前; フォントフェイス指定		指定字体名
+ * %bX;     ボールド指定    0:off 1:on   指定粗体 0关1开 其他为默认
+ * %iX;    イタリック指定  0:off 1:on  指定斜体
+ * %数値;  フォントサイズ指定(默认大小的多少百分比)	指定字体大小
+ * #xxxxxx; 色指定(xxxは色を16進指定)			指定颜色（16进制）
+ * %r      フォントリセット						重置文字
+ *
+ * スタイル指定					指定样式
+ * %p数値; ピッチ				字间距
+ *
+ * 特殊指定				特殊值
+ * %d数値;  指定文字的等待时间 标准的多少百分比 (100为标准速度)
+ * %w数値;  等待一定时间 标准文字速度的多少百分比 (100为标准速度)
+ * ${xxx}(&xxx;)   埋め込み指定(xxxは変数名) 	指定内嵌文字（要求在f(用户变量)的上下文中），xx为变量名
+ * $<xxx>;   	指定绘制文字，xxx为图像名   TODO 暂不支持
+    
+    双文本模式缩小字体      
+    不同语言不同字体
+ */
+ class TextRender {
+    var owner;
+    var language;   // 为渲染器指定的语言
+    var ignoreReline = false;   // 是否忽略换行符   多语言时缩减空间可用
+    var shrinkRatio = 1.0;   //缩小倍率    多语言时缩减空间可用
+
+    var _renderData = [];   //渲染预计算出的结果
+    var _renderTimer;       // 绘制定时器
+    var _renderPos=0;       // 绘制数据的位置
+
+    var startX;         // 记录开始绘制的位置
+    var startY;         
+    //状态量：会在计算字符位置时使用到，行高和字体大小会同时用于渲染计算的状态
+	var x;															//绘制行的的现在表示x位置
+	var y; // 現在の表示位置										现在的显示位置
+    var lineSize;           // 行高
+
+    // 渲染状态量： 只会在实际渲染时用于绘制的参数
+	var relinexpos; // 改行すべき最終右(縦書きの場合は下)位置  	换行的位置(横向纵向用同一个值)
+	var chColor; // 文字色										文字颜色
+	var pitch; // 字間  									字间距
+    var speed = 100;
+
+    //      行字体相关参数需要同步行修改
+    var _bold;
+    property bold{
+        getter{
+            return _bold;
+        }
+        setter(v){
+            lineLayer.font.bold = +v;
+            _bold = +v;
+        }
+    }
+    var _italic;
+    property italic{
+        getter{
+            return _italic;
+        }
+        setter(v){
+            lineLayer.font.italic = +v;
+            _italic = +v;
+        }
+    }
+    var _fontSize;
+    property fontSize{
+        getter{
+            return _fontSize;
+        }
+        setter(size){
+            lineLayer.font.height = +size;
+            _fontSize = +size;
+            if(!vertical)
+                relinexpos = int(layer.imageWidth-marginR-marginRCh*_fontSize);
+            else
+                relinexpos = int(layer.imageHeight-marginB-marginRCh*_fontSize);
+        }
+    }
+    var _fontFace;
+    property fontFace{
+        getter{return _fontFace;}
+        setter(v){
+             _fontFace = v;
+            if(!vertical)
+            {
+                lineLayer.font.angle = 0;
+                lineLayer.font.face = v;
+            }
+            else
+            {
+                _fontFace = '@' + v ;      
+                lineLayer.font.angle = 2700;
+                lineLayer.font.face = _fontFace;
+            }
+        }
+    }
+
+	var _currentRuby = []; // 次の文字に対するルビ							现在的振假名长度 信息
+	var _currentRubyCount = 0; //现在的振假名字符数
+	var _rubyStr = ""; //当前振假名字符
+    
+    
+    var lineLayer;
+    var lineLayerOriginX; // 表示オフセットX							行层初始的x偏移量
+	var lineLayerOriginY; // 表示オフセットY 							行层初始的y偏移量
+	var lineLayerBase; // ベースライン(横書き:下線位置/縦書き:中央位置)	基准线
+	var lineLayerPos; // lineLayer 中の文字表示位置					绘制层中的下一个字符的开始绘制的位置,  也是状态量，会参与渲染预计算
+	var lineLayerLength; // lineLayer 中の文字幅						绘制层中的文字长度
+
+
+    property working{
+        getter{
+           return _renderTimer.enabled;
+        }
+        setter(v){
+            if(v==working)return;
+            if(v)
+                startRender();
+            else stopRender();
+        }
+    }
+    /** 
+     * @description: 构造方法
+     * @param owner 所有者，所有者需要存储一些绘制相关的样式信息，样式会从这里取值
+     * @param layer 绘制文字的层，如果不需要频繁变更层，那么可以在构造方法中传入，以后不再更改。或者每次init改变该属性
+     * @param language  当前的语言信息，根据此决定字体
+     * @return void
+     */
+    function TextRender(owner,layer,language){ // 所有者的消息层 绘制的目标层   当前语言
+        this.owner = owner;
+        this.layer = layer;
+        this.language = language;
+        Scripts.setCallMissing(this);
+        _renderTimer = new Timer(this, 'timerCallback');
+    }
+
+    function finalize(){
+        invalidate lineLayer;
+        invalidate _renderData;
+        invalidate _renderTimer;
+    }
+
+    /** 
+     * @description: 预渲染时计算属性变更 包括字体 字体大小 粗体 斜体  颜色 速度
+     * @param propName  属性名
+     * @param value 属性值
+     * @return 
+     */
+    function _calcuChangeStyle(propName,value){
+        _renderData.push(%[type:'prop',name:propName,value:value]);
+        this[propName] = value;
+    }
+
+    /** 
+     * @description: 预渲染计算时计算换行
+     * @return 
+     */
+    function _calcuReline()
+	{
+        if(_currentRubyCount > 0)   //换行时记录振假名的换行
+            _currentRuby[_currentRuby.count-1].end = lineLayerPos;
+        if(vertical)
+        {
+            y = marginT;
+            x -= lineSize + lineSpacing;
+        }
+        else
+        {
+            y += lineSize + lineSpacing;
+            x = marginL;
+        }
+        for(var i=_renderData.count-1;i>=0;i--){
+            if(_renderData[i].type=="start" ){   // 因为解析行末才知道这行需要的高度，start代表一行开始，准备变更行的高度
+                _renderData[i].lineSize = lineSize; // 需要记录该行的高度
+                break;
+            }
+        }
+        _renderData.push(%[type:"reline"]); // 记录换行
+        _renderData.push(%[type:"start"]); // 开头记录这一行的行高
+        _calcuChangeLineSize(true); // 重设行高
+        lineLayerPos = lineLayerPadding;
+	}
+
+     // 
+
+    /** 
+     * @description: 预渲染计算中, 进行行高的计算,如果不指定强制则只能扩大行高
+     * @param forceresize   是否强制变更行高
+     * @return 
+     */
+    function _calcuChangeLineSize(forceresize = false){
+        var newlinesize = reserveLineSize > fontSize ? reserveLineSize : fontSize;
+        if(forceresize || newlinesize>lineSize){
+            lineSize = newlinesize;
+        }
+    }
+
+    
+	function _calcuCh(ch)//绘制字符ch，首先检测禁则文字，调整行图层大小  调整lineLayerPos等变量
+	{
+		var vert = vertical;
+		//根据禁则文字和是否自动换行决定是否继续进行
+		if((vert ?  y >= relinexpos  : x >= relinexpos ))
+		{
+            var lastDrawnCh = _renderData.count>0?_renderData[_renderData.count-1].text:"";
+			if(((wwLeading.indexOf(lastDrawnCh)==-1) && wwFollowing.indexOf(ch)==-1) ||     // 空字符串和void indexof也会 返回-1
+				( wwFollowingWeak.indexOf(lastDrawnCh)!=-1 && wwFollowingWeak.indexOf(ch)!=-1))
+			{    // 非禁则文字尝试换行
+				// 最後に描画したのが行末禁則文字でない場合
+				// しかもこれから描画するのが行頭禁則文字でない
+				// 場合
+				// または弱禁則文字が連続していない場合
+				_calcuReline();
+			}
+			else if(vert ? ( y>layer.imageHeight ) : (x>layer.imageWidth))  // 即使是禁则文字超过右端也要换行
+			{
+				// これから描画するのが強禁則文字ではなくて、
+				// 確実に 右端を越える場合
+				// ( この場合は余白は考えない )
+				_calcuReline();
+			}
+		}
+		_calcuChangeLineSize();	// 因为字体可能扩大 重新计算行高（注意只能扩充不能缩小）
+
+        if(_currentRubyCount>0){//存在振假名时继续记录
+            if(!isBlank(_currentRuby[_currentRuby.count-1].end)){//振假名的上一段结束了则开启新段
+                _currentRuby.push(%[index:_renderData.count,start:lineLayerPos]);// 这里count没有-1是因为接下来要插入新值
+            }
+            _currentRubyCount--;
+        }
+
+		var cw = lineLayer.font.getTextWidth(ch);
+        if("\t"==ch) {
+            cw = lineLayer.font.getTextWidth(" ") * SystemConfig.tabSize;
+            ch=" ";
+        }
+		var dx , dy;
+
+		if(vert)
+			// dx = int(lineLayerBase+(fontSize>>1)), dy = int(lineLayerPos);
+			dy = int(lineLayerPos);
+		else
+			// dx = int(lineLayerPos), dy = int(lineLayerBase-fontSize);
+			dx = int(lineLayerPos);
+
+        _renderData.push(%[type:'text',text:ch,pos:lineLayerPos]);
+		cw += +pitch; //加上字间距
+		if(vert) y += +cw; else x += +cw; 
+		lineLayerPos += cw; //注意这里记录的坐标是在行层上的坐标
+
+        if(_currentRubyCount == 0 && _currentRuby.count!=0){// 振假名记录结束位置
+            _currentRuby[_currentRuby.count-1].end = lineLayerPos;
+            _calcuEndRuby();    // 结束振假名计算
+        }   
+	}
+
+    // 振假名结束后重新分配到渲染数据内
+    function _calcuEndRuby(){
+        var sumLength = 0;
+        // 计算每段的长度
+        for(var i=0;i<_currentRuby.count;i++){//计算振假名总长度
+            var item =  _currentRuby[i];
+            var length =item.end-item.start;
+            item.length = +length;
+            sumLength += +length;
+        }
+        var sumChCount=0;   // 每段的字符长度数和
+        var rubyChCount = _rubyStr.length;  // 要渲染的振假名总字符数
+        //  计算每段分配的字符长度
+        for(var i=0;i<_currentRuby.count-1;i++){    //count-1 不循环最后一个位置，因为可能有精度问题
+            var item =  _currentRuby[i];
+            item.chCount = (item.length * rubyChCount) \sumLength;    //长度比例算出占多少字符
+            sumChCount += item.chCount;
+        }
+        _currentRuby[_currentRuby.count-1].chCount = rubyChCount - sumChCount; // 减去前面的总长度算出字符数目
+        dm(_currentRuby);//debug 信息
+        var rubyStrOffset = _rubyStr.length; // 每段的起始字符串取值位置
+        for(var i=_currentRuby.count-1;i>=0;i--){  //必须倒叙，因为index会增加导致后面的记录的index错误
+            //首先计算渲染的位置和参数
+            var item =  _currentRuby[i];
+            var rubyLength = item.chCount * rubySize;
+            var startPos,rubyPitch;
+            if(rubyLength <= item.length){ // 振假名长度小于文字
+                rubyPitch = item.length / item.chCount - rubySize;
+                startPos = rubyPitch / 2;//半个字间距作为起始位置
+            }else{  //  大于文字
+                rubyPitch = 0;
+                startPos = -(rubyLength - item.length)/2;
+            }
+            startPos += item.start;
+            
+            var currentRubyIndex = 0;//当前渲染的第几个字符
+            rubyStrOffset -= item.chCount;  // 倒着计算当前字符的下标
+            var index = item.index; // 从指定开始下标开始
+            while(currentRubyIndex<item.chCount){// 处理完当前段所有振假名才结束
+                if(index>=_renderData.count || _renderData[index].type == 'reline'){// 遇到换行或已到达当前文本结尾 输出全部 
+                    while(currentRubyIndex<item.chCount){
+                        _renderData.insert(index,%[type:'ruby',pos:startPos,text:_rubyStr.charAt(rubyStrOffset+currentRubyIndex)]); 
+                        startPos+=rubyPitch + rubySize;
+                        currentRubyIndex++;
+                        index++;
+                    }
+                    break;
+                }
+                if(_renderData[index].type!='text'){//跳过所有非字符指令
+                    index++;
+                    continue;
+                }
+                if(_renderData[index].pos>=startPos){
+                    _renderData.insert(index,%[type:'ruby',pos:startPos,text:_rubyStr.charAt(rubyStrOffset+currentRubyIndex)]); 
+                    startPos+=rubyPitch + rubySize;
+                    currentRubyIndex++;
+                    index++;
+                }else index++;
+            }
+        }
+        _currentRuby = [];
+        _rubyStr = "";
+        _currentRubyCount = 0; //总字符数和当前处理字符数清空
+    }
+
+   
+    /** 
+     * @description: 开始记录振假名信息
+     * @param ch    振假名文字
+     * @param num   接下来几个文字上绘制振假名
+     * @return  void
+     */
+    function _calcuRuby(ch,num){
+        //开始记录振假名
+        _currentRuby = [];
+        _currentRuby[0] = %[index:_renderData.count,start:lineLayerPos];//记录振假名开始的数据位置 和 用于计算的起始位置坐标
+        _rubyStr = ch;
+        _currentRubyCount = num; //当前处理的字符数
+    }
+
+    function _parseNextSymbol(text,index){
+        var ch,pos,num;
+        switch(text[index]){
+            case "%":
+                ch  = text[index+1];    //特殊字符
+                pos = text.indexOf(";",index);  //;的位置
+                if(pos==-1) throw new Exception("the text have unsupport symbol",Scripts.getTraceString());
+                if(#ch>=97 && #ch<=122){ // a-z
+                    num = text.substr(index+2,pos-index-2); //记录的数值
+                    switch(ch){
+                        case "f":_calcuChangeStyle("fontFace",num);break; 
+                        case "b":_calcuChangeStyle("bold",+num);  break;
+                        case "i": _calcuChangeStyle("italic",+num); break;
+                        case "r":resetStyle(false); _renderData.push(%[type:'reset']); break;
+                        case "p":_calcuChangeStyle("pitch",+num);   break;
+                        case "d":_calcuChangeStyle("speed",+num);   break;
+                        case "w":              
+                            _renderData.push(%[type:'wait',time:+num]);
+                            break;
+                        default: throw new Exception("the text have unsupport symbol",Scripts.getTraceString());
+                    }
+                }else{
+                    num = +text.substr(index+1,pos-index-1); //记录的数值
+                    _calcuChangeStyle("fontSize",num/100*fontSize);
+                }
+                return pos+1;
+            case "[":   // ruby 怎么处理往后放放
+                pos = text.indexOf("]",index);  //]的位置
+                var comma = text.indexOf(","); // 逗号的位置
+                if(comma == -1){    // 不写逗号默认1
+                     ch = text.substr(index+1,pos-index-1);
+                    num = 1;
+                }
+                else{
+                    ch = text.substr(index+1,comma-index-1);
+                    num = text.substr(comma+1,pos-comma-1); 
+                }
+                _calcuRuby(ch,num);
+                return pos+1;
+            case "#"://文字颜色
+                pos = text.indexOf(";",index);  //;的位置
+                num = text.substr(index+1,pos-index-1); //记录的数值
+                _renderData.push(%[type:'prop',name:"chColor",value:num]);
+                return pos+1;
+            case "$":       // 图像文字再说吧
+                pos = text.indexOf(";",index);  //;的位置
+                return pos+1;
+            case "\\"://禁则文字
+                ch = text[index+1]; index+=2; 
+                break;
+            default: 
+                ch = text[index]; index++; 
+        }
+        if(ch =="\n")_calcuReline();
+        else _calcuCh(ch);
+        return index;
+    }
+
+     /** 
+     * @description:    用文本初始化渲染内容，填充渲染数据
+     * @param area      渲染区域起始坐标,格式：{x:,y}
+     * @param 绘制用的文字层
+     * @param textStr   输出文本内容
+     * @return void
+     */
+    function init(area,layer,textStr){
+        this.layer = layer;
+        // 行描画用の浮遊レイヤを確保							生成用于行绘制的图层
+		lineLayer = new global.KAGLayer(owner.window, layer);
+		lineLayer.hitType = htMask;
+		lineLayer.hitThreshold = 256; // マウスメッセージは全域透過		全域透过鼠标点击
+		lineLayer.face = dfAuto;
+		lineLayer.type = layer.type;
+		lineLayer.name = "floatting message layer for line drawing";
+
+        startX = x = area.x; 
+        startY = y = area.y; 
+        lineLayerPos = lineLayerPadding;
+        resetStyle(true);
+        _renderData = [];
+        _currentRuby = [];
+        _currentRubyCount = 0;
+        _rubyStr = ""; //当前振假名字符
+        // dm("start dealing:"+textStr);
+        // 1. 首先处理内嵌变量
+        var func = function(str){
+            str = (str).replace(/&(.*?);/g, function (m) { return "${"+m[1]+"}"; }); // &～; を ${～}に置換     把 &～; 换成  ${～}
+            str = (str).replace(/\$\{(.*?)\}/g, function (m) { // 	搜索   ${～} 
+                return global.f[m[1]]; // 变量使用用户变量中的内容
+            });
+            return str;
+        };
+        textStr = func(textStr);
+        // dm("deal with inner variable:"+textStr);
+        //2. 处理\n 和\t 转义
+        textStr = textStr.replace(/(?<!\\)\\n/g,"\n");
+        textStr = textStr.replace(/(?<!\\)\\t/g,"\t");
+        // dm("replace \\n and \\t:"+textStr);
+        //3. 开始处理所有字符
+        _renderData.push(%[type:"start"]); //开头的指令
+        for(var i = 0;i<textStr.length;){
+            i = _parseNextSymbol(textStr,i);
+        }
+      
+        for(var i=_renderData.count-1;i>=0;i--){
+            if(_renderData[i].type=="start" ){   // 因为解析行末才知道这行需要的高度，start代表一行开始，准备变更行的高度
+                _renderData[i].lineSize = lineSize; // 需要记录该行的高度
+                break;
+            }
+        }  
+        return %[x:x,y:y];//返回结束的位置
+    }
+
+    /** 
+     * @description: 恢复到消息层设置的字体 每次开始绘制以及 %r 会调用，但是绘制中不会强制变更行高
+     * @param force 是否强制变更，会影响行高是否强制变更
+     * @return 
+     */
+    function resetStyle(force =false){
+        fontFace =  owner.getFontFace(language);
+        fontSize = shrinkRatio * owner.fontSize;
+        bold = owner.bold; 
+        italic = owner.italic; 
+        chColor = owner.chColor; 
+        pitch = owner.pitch; 
+        if(force)
+            lineSize = owner.reserveLineSize > fontSize ? owner.reserveLineSize : fontSize; // 这里的是缩小过的
+        else _calcuChangeLineSize();
+        speed = 100;
+    }
+
+    /** 
+	* @description: 	根据对齐方式，获取行x位置  ,此方法可用于行层初始化时设置位置
+    *      也可以用与中间对齐，右对齐方式时行层需要不停移动的调整
+	* @return 		左端点的位置
+	*/	
+	function _getLineLayerLeftOffset()
+	{
+		// 行描画用レイヤ内での左オフセットを取得
+		if(!vertical)
+		{
+			if(align == -1)
+				return -lineLayerPadding;
+			else if(align == 0)
+				return ((layer.imageWidth - marginR - marginL - lineLayerLength)>>1) - lineLayerPadding;
+			else if(align == 1)
+				return layer.imageWidth - marginR - marginL - lineLayerLength - lineLayerPadding;
+		}
+		else return -lineSize - lineSpacing - lineLayerPadding;
+	}
+
+	/** 
+	* @description: 	根据对齐方式，获取行y位置 ,此方法可用于行层初始化时设置位置
+    *      也可以用与中间对齐，右对齐方式时行层需要不停移动的调整
+	* @return 		上端点的位置
+	*/	
+	function _getLineLayerTopOffset()
+	{
+		// 行描画用レイヤ内での上オフセットを取得
+		if(!vertical) return -(lineLayer.imageHeight - lineLayerPadding - lineSize - lineSpacing);
+		else
+		{
+			if(align == -1)
+				return -lineLayerPadding;
+			else if(align == 0)
+				return ((layer.imageHeight - marginB - marginT - lineLayerLength)>>1) - lineLayerPadding;
+			else if(align == 1)
+				return layer.imageHeight - marginB - marginT - lineLayerLength - lineLayerPadding;
+			return -lineLayerPadding;
+		}
+	}
+
+    /** 
+     * @description: 调整行层对齐位置
+     * @return  void
+     */
+    function _adjustAlign() //根据对齐方式调整位置
+	{
+		lineLayer.setPos(lineLayerOriginX + _getLineLayerLeftOffset(),
+			lineLayerOriginY + _getLineLayerTopOffset());
+	}
+
+    function _getLineLayerBaseLine() //获得文字的基准线，修改lineLayerBase时用此方法计算
+	{
+		// 文字表示用のベースラインを計算して返す
+		// 横書きの場合は文字の下端部分、
+		// 縦書きの場合は文字の中央線
+		if(!vertical)
+			return -_getLineLayerTopOffset() + lineSpacing + lineSize;
+		else
+			// 縦書き
+			// 中央線(レイヤ左端からの位置)
+			return lineLayerPadding + (lineSize>>1);
+	}
+    
+
+
+    function _processChangeStyle(elm){
+        var name = elm.name;
+        var value = elm.value;
+        this[name] = value;
+    }
+
+
+    /** 
+     * @description: 绘制时的换行，同时会将行层内容固定到文字层上
+     * @return void
+     */
+    function _processReline(){			
+        _fixLineLayer();//绘制行
+        if(vertical)
+        {
+            y = marginT;
+            x -= lineSize + lineSpacing;
+        }
+        else
+        {
+            y += lineSize + lineSpacing;
+            x = marginL;
+        }
+        _initLineLayer(); 
+    }
+
+    /** 
+     * @description: 渲染时处理普通文字,会自动换行及处理振假名文字
+     * @return void
+     */
+	function _processCh(data)//绘制字符ch，首先检测禁则文字，调整行图层大小 （link） 绘制文字 绘制振假名，（link中则覆盖领域图像）调整lineLayerPos等变量
+	{
+        var vert = vertical;
+        var ch = data.text;
+ 		var ll = lineLayer;
+        ll.visible = true;
+ 		var llfont = ll.font;
+		var cw = llfont.getTextWidth(ch);
+        if("\t"==ch) cw = lineLayer.font.getTextWidth(" ") * SystemConfig.tabSize;
+		var dx , dy;
+		if(vert)
+			dx = int(lineLayerBase+(fontSize>>1)), dy = int(data.pos);
+		else
+			dx = int(data.pos), dy = int(lineLayerBase-fontSize);
+
+
+        if (shadow) ll.drawText(dx, dy, ch, chColor, 255, antialiased, 255, shadowColor&0xffffff, shadowWidth, shadowOffsetX, shadowOffsetY);
+        if  (edge)       ll.drawText(dx, dy, ch, chColor, 255, antialiased, edgeEmphasis, edgeColor&0xffffff, edgeExtent, 0, 0);
+        else ll.drawText(dx, dy, ch, chColor, 255, antialiased);
+        
+		cw += +pitch; //加上字间距
+		if(vert) y += cw; else x += cw; 
+		// lineLayerPos += cw; //注意这里记录的坐标是在行层上的坐标
+		lineLayerLength += cw;  
+		_adjustAlign() if(align >= 0);	// 调整lineLayer位置 ( 非左对齐方式都要不停调整位置)
+	}
+    // 图形文字和竖写文字 日后考虑
+    /*function putGraph(storage, key, ischar) // 绘制一个图像 发生换页则不绘制返回真值，否则返回假值
+	{
+		// 画像 storage を描画する    
+
+		// テンポラリのレイヤを用意   准备临时图层
+		var lay = window.temporaryLayer;
+
+		lay.type = ltTransparent;
+		lay.face = dfAuto;
+		lay.loadImages(storage, key); // 画像読み込み
+		var lw, lh;
+		lw = lay.imageWidth;
+		lh = lay.imageHeight;
+
+		var cw;
+		if(vertical)
+		{
+			if(lw > lineSize) lineSize = lw; // 拡張
+			cw = lh;
+		}
+		else
+		{
+			if(lh > lineSize) lineSize = lh; // 拡張
+			cw = lw;
+		}
+
+		changeLineSize();
+
+		if(inLink != -1) beginLinkLine();
+
+		var repage = false;
+
+		if(autoReturn)
+		{
+			// 改行位置に達している？
+			if(vertical ? ( y > relinexpos ) : (x > relinexpos) )
+			{
+				repage = reline();
+			}
+		}
+
+		if(repage) return true; // 文字は描画しない   如果发生换页则不绘制 返回真
+
+
+		// 描画
+		var cx,cy;
+		if(vertical)
+		{
+			cx = lineLayerBase - (lw>>1);
+			cy = lineLayerPos;
+		}
+		else
+		{
+			cx = lineLayerPos;
+			cy = lineLayerBase - lh;
+		}
+
+		if(ischar && (shadow || edge) )
+		{
+			lay.face = dfOpaque;
+			lay.holdAlpha = true;
+				// 影/袋文字の色でメインを塗りつぶす
+
+			if(edge)
+			{
+				// 袋
+				lay.fillRect(0, 0, lw, lh, edgeColor);
+				lineLayer.operateRect(cx+1, cy, lay, 0, 0, lw, lh);
+				lineLayer.operateRect(cx, cy+1, lay, 0, 0, lw, lh);
+				lineLayer.operateRect(cx-1, cy, lay, 0, 0, lw, lh);
+				lineLayer.operateRect(cx, cy-1, lay, 0, 0, lw, lh);
+			}
+			else if(shadow)
+			{
+				// 影
+				lay.fillRect(0, 0, lw, lh, shadowColor);
+				lineLayer.operateRect(cx+shadowOffsetX, cy+shadowOffsetY, lay, 0, 0, lw, lh);
+			}
+
+		}
+
+		if(ischar)
+		{
+			lay.face = dfOpaque;
+			lay.holdAlpha = true;
+			lay.fillRect(0, 0, lw, lh, chColor);
+				// メインを文字色で塗りつぶす
+		}
+
+		lineLayer.operateRect(cx, cy, lay, 0, 0, lw, lh); // 描画  从临时层复制到行层上
+
+		// 描画おわり
+		lastDrawnCh="";
+
+		if(inLink!=-1)
+		{
+			// ハイパーリンクでちゅー  超链接
+			lineLayer.face = dfProvince;
+			if(vertical)
+				lineLayer.fillRect(lineLayerBase - (fontSize>>1), lineLayerPos,
+					fontSize, cw, numLinks+1);
+			else
+				lineLayer.fillRect(lineLayerPos, lineLayerBase - fontSize,
+					cw, fontSize, numLinks+1);
+			face = dfAuto;
+			lineLayer.face = dfBoth;
+			// 領域画像も塗りつぶしてやる
+			linkFilled=true;
+		}
+
+		if(vertical) y+=cw; else x+=cw;
+
+		lineLayerPos += cw;
+		lineLayerLength += cw;
+
+		lineLayer.visible = true;
+
+		if(align >= 0) adjustAlign();
+
+		return false;
+	}
+
+	function putHorizonCh(text, expand = false)
+	{
+		// 縦中横を描画する
+		if(!vertical) throw new Exception("縦書きモードでないと使用できません");
+
+		// フォントを設定し直す
+		var ll = lineLayer;
+		var lf = ll.font;
+		var orgfont = lf.face;
+		var organgle = lf.angle;
+		lf.face = orgfont.substring(1); // 先頭の @ マークを取り除く
+		lf.angle = 0;
+
+		// 描画する文字の横幅を取得
+		var cw = lf.getTextWidth(text);
+		var ch = fontSize;
+
+		// linesize の拡張
+		if(expand)
+		{
+			if(cw > lineSize) lineSize = cw; // 拡張
+			changeLineSize();
+		}
+
+		// リンク中の場合はリンクを開始
+		if(inLink != -1) beginLinkLine();
+
+		// 改行/改ページ処理
+		var repage = false;
+		if(autoReturn)
+		{
+			// 改行位置に達している？
+			if(y > relinexpos) repage = reline();
+		}
+		if(repage)
+		{
+			// 戻る前にフォントをもとにもどす
+			lf.face = orgfont;
+			lf.angle = organgle;
+			return true; // 文字は描画しない
+		}
+
+		// 描画
+		var dx = lineLayerBase - (cw>>1);
+		var dy = lineLayerPos;
+
+        if(edge)
+			ll.drawText(dx, dy, text, chColor, 255, antialiased, edgeEmphasis, edgeColor, edgeExtent, 0, 0); // 文字
+		else if(shadow)
+			ll.drawText(dx, dy, text, chColor, 255, antialiased, 255, shadowColor, 0, 2, 2); // 文字
+		else
+			ll.drawText(dx, dy, text, chColor, 255, antialiased); // 文字
+
+		// 描画おわり
+		lastDrawnCh="";
+
+		// フォントを元に戻す
+		lf.face = orgfont;
+		lf.angle = organgle;
+
+		// ハイパーリンクの処理
+		if(inLink!=-1)
+		{
+			// ハイパーリンクでちゅー
+			ll.face = dfProvince;
+			ll.fillRect(lineLayerBase - (fontSize>>1), lineLayerPos,
+				fontSize, cw, numLinks+1);
+			face = dfAuto;
+			ll.face = dfAuto;
+			linkFilled=true;
+		}
+
+		// 位置更新
+		y += ch;
+		lineLayerPos += ch;
+		lineLayerLength += ch;
+
+		lineLayer.visible = true;
+
+		// アラインの修正
+		if(align >= 0) adjustAlign();
+
+		// 戻る
+		return false;
+	}*/
+    /** 
+     * @description: 内部渲染振假名文字，振假名文字不支持\t 
+     * @param data  内部处理的数据
+     * @return void
+     */
+    function _processRuby(data){// 
+        var vert = vertical;
+        var ch =data.text;
+        var ll = lineLayer;
+ 		var llfont = ll.font;
+        ll.visible = true;
+        var orgsize = llfont.height;
+        llfont.height = rubySize;
+        var rx,ry;
+        if(!vert)
+        {
+            rx = data.pos;//int(dx + (cw>>1) - (rw>>1));
+            ry = int(int(lineLayerBase-lineSize) - rubySize - rubyOffset);
+        }
+        else
+        {
+            rx = int(int(lineLayerBase+(lineSize>>1)) + rubySize + rubyOffset);
+            ry = data.pos;//int(dy + (cw>>1) - (rw>>1));
+        }
+
+        if (shadow) ll.drawText(rx, ry, ch, chColor, 255, antialiased, 255, shadowColor&0xffffff, shadowWidth, shadowOffsetX, shadowOffsetY);
+
+        if  (edge)       ll.drawText(rx, ry, ch, chColor, 255, antialiased, edgeEmphasis, edgeColor&0xffffff, edgeExtent, 0, 0);
+        else ll.drawText(rx, ry, ch, chColor, 255, antialiased);
+        llfont.height = orgsize;
+    }
+    /** 
+     * @description: 换行时： 重置行大小
+     * @return void
+     */
+    function _changeLineSize(){
+        var newlinelayersize =  lineSize +  lineLayerPadding*2;
+		if(rubySize + rubyOffset > lineSpacing)			// 行高的留白要大于振假名
+			newlinelayersize += rubySize+rubyOffset;
+		else newlinelayersize += lineSpacing;
+        if(!vertical)
+		{
+            lineLayer.imageHeight = newlinelayersize;
+            lineLayer.setSizeToImageSize();
+            lineLayerBase = _getLineLayerBaseLine();
+		}
+		else
+		{
+			// 縦書きの場合
+            lineLayer.imageWidth = newlinelayersize;
+            lineLayer.setSizeToImageSize();
+            lineLayerBase = _getLineLayerBaseLine();
+		}
+    }
+
+    /** 
+    * @description: 初始化绘制行，初始化行大小，位置，清空内容,换行以及初始化时调用
+    * @return void
+    */
+	function _initLineLayer()  
+	{
+		// lineLayer の初期化
+		var ll = lineLayer;
+		lineLayerOriginX = x;
+		lineLayerOriginY = y;
+		if(!vertical)
+			ll.imageWidth = layer.imageWidth + lineLayerPadding*2;
+		else
+			ll.imageHeight = layer.imageHeight + lineLayerPadding*2;
+		_changeLineSize();// 改变行大小 
+        _adjustAlign(); //重设行位置
+		lineLayerLength = 0;
+        ll.visible = false;
+		var lliw = ll.imageWidth;
+		var llih = ll.imageHeight;
+		ll.fillRect(0, 0, lliw, llih, 0);
+	}
+
+    function _fixLineLayer()//将lineLayer绘制到文字层上
+	{
+		// lineLayer を現在の表示位置に確定
+		var ll = lineLayer;
+		if(ll.visible == false) return;
+		var llox = lineLayerOriginX + _getLineLayerLeftOffset();
+		var lloy = lineLayerOriginY + _getLineLayerTopOffset();
+		// layer.face = dfAuto;
+		layer.operateRect(
+			llox,
+			lloy,
+			ll, 0, 0, ll.imageWidth, ll.imageHeight);
+		ll.visible = false;
+	}
+
+
+    /** 
+     * @description:    开始渲染
+     * @param immediate:    是否立即结束绘制
+     * @return void
+     */
+    function startRender(immediate=false){
+       	// 表示位置を初期位置に
+        x = startX;
+        y = startY;
+        resetStyle(true);
+        _initLineLayer();
+        _renderPos = 0;
+        _renderTimer.enabled = true;
+        _renderTimer.interval = actualChSpeed * speed / 100;
+        if(actualChSpeed<=0)immediate = true;
+        if(immediate)
+            stopRender();
+    }
+
+    /** 
+     * @description:    定时器处理方法
+     * @param event:事件的固有参数    
+     * @param immediate:是否瞬间完成绘制    
+     * @return          是否结束绘制
+     */
+    function timerCallback(event,immediate = false){
+        if(_renderPos >= _renderData.count){
+            _renderTimer.enabled = false;
+            onRenderComplete(); 
+            return true;
+        }
+        if(actualChSpeed<=0)immediate = true;
+        var data = _renderData[_renderPos];
+         _renderPos++;
+        switch(data.type){
+            case "start":   
+                if(!isBlank(data.lineSize))
+                    lineSize = data.lineSize; // 第一行可能需要的特殊处理
+                _changeLineSize();
+                return timerCallback(,immediate);
+            case "prop":
+                _processChangeStyle(data);
+                return timerCallback(,immediate);
+            case "reset":
+                resetStyle(false);
+                return timerCallback(,immediate);
+            case "wait":
+                 _renderTimer.interval = data.time / 100 * actualChSpeed;
+                if(immediate)return timerCallback(,immediate);
+                return;
+            case "reline":
+                _processReline();
+                break;
+            case "text":
+                _processCh(data);
+                break;
+            case "ruby":
+                _processRuby(data);
+                return timerCallback(,immediate); // Ruby文字不等待 
+            default:
+                throw new Exception("render data has unsupport instruct!",Scripts.getTraceString());
+        }
+        if(immediate) return timerCallback(,true);
+        else {
+            _renderTimer.interval = actualChSpeed * speed / 100;
+            if(_renderPos >= _renderData.count){
+                _renderTimer.enabled = false;
+                onRenderComplete();
+                return true;
+            }
+            else return false;
+        }
+    }   
+    function stopRender(){
+        timerCallback(,true);
+    }
+    function onRenderComplete(){
+        if(!isBlank(lineLayer))_fixLineLayer();//可能会存在没有绘制上去的情况
+        invalidate lineLayer;
+        owner.onRenderComplete(language);
+    }
+
+    function missing(set, name, value) {
+        if (!set && !isBlank(owner,name)) {//取得方法
+            *value = owner[name];
+            return true;
+        }
+        return false; //如果不想处理则返回
+    }
+
+ }

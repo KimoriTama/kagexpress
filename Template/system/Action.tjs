@@ -1,0 +1,2340 @@
+//
+// 汎用アクション機能実装用クラス群
+//
+//设置属性		其实根本用不到这些参数
+function setProperty(target, name,value)
+{
+	if (name.charAt(0) == '$') {
+		if (typeof target.setVariable != "undefined") {
+			target.setVariable(name.substr(1), value, time, accel);
+		}
+	} else if (typeof target.setProperty != "undefined") {
+		target.setProperty(name, value, time, accel);
+	} else if(name.indexOf(".")>=0){
+		return setProperty(target[name.substr(0,name.indexOf("."))],name.substr(name.indexOf(".")+1),value);
+	}
+	else {
+		target[name] = value;
+	}
+	
+}
+//获取属性
+function getProperty(target, name)
+{
+	if (name.charAt(0) == '$') {
+		if (typeof target.getVariable != "undefined") {
+			return target.getVariable(name.substr(1));
+		}
+	} else if (typeof target.getProperty != "undefined") {
+		return target.getProperty(name);
+	} else if(name.indexOf(".")>=0){
+		return getProperty(target[name.substr(0,name.indexOf("."))],name.substr(name.indexOf(".")+1));
+	}
+	else{
+		return target[name];
+	}
+	
+}
+
+/**
+ * 相対値計算		@代表当前值
+ * @param value 値指定	设置值
+ * @param orig オリジナルの値 初始值
+ * @param context 上下文
+ */
+function getRelative(value, orig, context) {
+	if (typeof value == "String") {
+		if (value.charAt(0) == "#") {
+			return value.substr(1);
+		} else if (value.indexOf("@") >= 0) {
+			return Scripts.eval(value.replace(/@/, (string)orig),,,context);
+		} else {
+			return value;
+		}
+	} else {
+		return value;
+	}
+}
+
+/**
+ * アクション情報の最後の項目の情報を取得		获取操作信息中最后一项的信息
+ * @param action アクション
+ * @return 最後の辞書情報
+ */
+function getLastActionDict(action)
+{
+	if (action instanceof "Dictionary") {
+		return action;
+	}
+	if (action instanceof "Array") {
+		for (var i=action.count-1;i>=0;i--) {
+			var ac = action[i];
+			if (ac instanceof "Dictionary") {
+				return ac;
+			}
+		}
+	}
+}
+
+// アクションの補助パラメータ全部	动作信息的辅助参数	
+// 辞書アクションの直下にあって総合的なパラメータを指定する	  指定字典动作正下方的综合参数
+var actionParams = %[
+	"name", true, // 名前指定
+	"time", true, // 全体時間指定
+	"mag",   true, // 全体倍率指定
+	"speed", true, // 全体スピード指定
+	"delay", true, // 全体遅延指定
+	"accel", true, // 全体加減速指定
+	"starttime", true, // 開始時間指定
+	"quake", true, // 振動扱いフラグ
+	"nofast", true, // 早送り動作しないフラグ
+	"nowait", true, // ページ待ちしないフラグ
+	"complete", true,  // 終了時処理指定
+	"after", true,  // 完了後処理指定
+	];
+//elm 是一般参数  DICT是共有参数 nowait指定是否延迟 返回值为拼装后的参数
+function _convDictAction(dict, elm, nowait)
+{
+	var e;
+	if (elm instanceof "Dictionary") {
+		e = Scripts.clone(elm);
+	} else if (typeof elm == "String" && elm.charAt(0) == "#") {
+		// 文字列単純指定で素通し	只指定字符串值
+		e = %[handler:"",value:elm];
+	} else if (typeof elm == "String" || typeof elm == "Integer" || typeof elm == "Real") {
+		// 値指定		指定值
+		e = %[handler:"MoveAction",value:elm];
+	} else {
+		// 待ち処理にする		指定等待
+		e = %[handler:"wait"];
+	}
+	// 共通パラメータ反映
+	with (dict) {
+		// 相対反映されるパラメータ
+		if (.mag !== void) {
+			if (e.mag === void) {
+				e.mag = .mag;
+			} else {
+				e.mag *= .mag;
+			}
+		}
+		if (.speed !== void) {
+			if (e.speed === void) {
+				e.speed = +.speed;
+			} else {
+				e.speed *= +.speed;
+			}
+		}
+		if (.delay !== void) {
+			if (e.delay !== void) {
+				e.delay = +.delay;
+			} else {
+				e.delay += +.delay;
+			}
+		}
+		if (.starttime !== void) {
+			if (e.starttime !== void) {
+				e.starttime = +.starttime;
+			} else {
+				e.starttime += +.starttime;
+			}
+		}
+		// 上書き反映
+		if (.time !== void) {
+			e.time = +.time;
+		}
+		if (.accel !== void) {
+			e.accel = .accel;
+		}
+		if (.quake !== void) {
+			e.quake = .quake;
+		}
+		if (.nowait !== void) {
+			e.nowait = .nowait;
+		}
+		if (.nofast !== void) {
+			e.nofast = .nofast;
+		}
+	}
+	e.nowait = nowait if nowait !== void;
+	return e;
+}
+
+/**
+ * アクション情報のプロパティ別の展開	展开动作信息的属性的字典  
+ * @param dict アクション情報の入った辞書(直下に上書きパラメータを含む) 	
+ * @param name プロパティ名		属性名
+ * @param nowait nowait指定の上書き  覆盖nowait属性
+ * @return 指定したプロパティ用のアクション情報	指定属性的动作信息
+ */
+function convDictAction(dict, name, nowait)
+{
+	var elm  = dict[name];
+	if (elm === void && (name == "zoomx" || name == "zoomy")) {
+		// zoom用特殊対応
+		elm = dict["zoom"];
+	}
+	if (elm instanceof "Array") {
+		var ret = [];
+		for (var i=0;i<elm.count;i++) {
+			ret.add(_convDictAction(dict, elm[i], nowait));
+		}
+		return ret;
+	} else {
+		return _convDictAction(dict, elm, nowait);
+	}
+}
+
+/**
+ * アクションデータの分割処理		分割处理动作信息
+ * @param action アクションデータ		动作信息数据
+ * @param names  分割対象プロパティ名リスト		分割对象的属性名列表
+ * @param nowait nowait オーバライド用			覆盖nowait
+ * @return 分割結果(プロパティ名とそのプロパティに対するアクション定義) 返回分割的结果	 （属性名称及其属性的操作定义
+ * 辞書:アクションまたはハンドラ無しで時間だけなら単に待ち指定		不存在action或handler则只等待一定时间
+ * 配列:ループ情報	循环信息
+ * その他:直値指定
+ * 结果是对于 每个 result[name] 为一个指定的数组，name有多个相同则数组有多个元素
+ * 这个函数是用于把一些共有参数写入到里面的，可以考虑做下 
+ */
+function splitAction(action, names, nowait)
+{
+	var result = %[];
+	if (action instanceof "Dictionary") {
+		var count = names.count;
+		for (var i=0;i<count;i++) {
+			var name = names[i];
+			result[name] = [convDictAction(action, name, nowait)];//这个数组里可能会嵌套一个数组
+		}
+	} else if (action instanceof "Array") {
+		// 連続アクションのエントリ		连续动作的键值对
+		var defaultAction;
+		var count = action.count;
+		for (var i=0;i<count;i++) {
+			var ac = action[i];
+			if (ac instanceof "Dictionary") {
+				if (ac["default"] !== void) {
+					// デフォルト指定
+					defaultAction = ac;
+				} else {
+					if (defaultAction !== void) {
+						// デフォルト指定をマージする
+						var e = Scripts.clone(defaultAction);
+						(Dictionary.assign incontextof e)(ac, false);
+						ac = e;
+					}
+					var nc = names.count;
+					for (var j=0;j<nc;j++) {
+						var name = names[j];
+						var list;
+						if ((list = result[name]) === void) {
+							list = [];
+							result[name] = list;
+						}
+						if (ac.loop !== void) {
+							// ループ指定
+							list.push(%[handler:"loop", loop:i-ac.loop,count:ac.count]);
+						} else if (ac.wait !== void) {
+							// 待ち指定
+							var e = %[handler:"wait", time:+ac.wait];
+							e.speed = ac.speed if ac.speed !== void;
+							e.nofast = ac.nofast if ac.nofast !== void;
+							list.push(e);
+						} else {
+							list.push(convDictAction(ac, name, nowait));
+						}
+					}
+				}
+			} else if (ac instanceof "Array") {
+				// ループ指定
+				var nc = names.count;
+				for (var j=0;j<nc;j++) {
+					var name = names[j];
+					var list;
+					if ((list = result[name]) === void) {
+						list = [];
+						result[name] = list;
+					}
+					list.push(%[handler:"loop",loop:i-ac[0],count:ac[1]]);
+				}
+			} else if (typeof ac == "Integer") {
+				// 待ち指定
+				var e = %[handler:"wait",time:+ac];
+				if (defaultAction !== void) {
+					e.nofast = defaultAction.nofast if defaultAction.nofast !== void;
+				}
+				var nc = names.count;
+				for (var j=0;j<nc;j++) {
+					var name = names[j];
+					var list;
+					if ((list = result[name]) === void) {
+						list = [];
+						result[name] = list;
+					}
+					list.push(e);
+				}
+			}
+		}
+	}
+	return result;
+}
+
+/**
+ * アクション情報から処理対象になる全プロパティ名を取得する		从动作信息获取要处理的所有属性名称
+ * @param action アクション情報		动作信息
+ * @param context 確認用コンテキスト hasProperty() を呼び出す	确认是否有属性用的上下文 		
+ */
+function getActionPropNames(action, context)
+{
+	var func = function(action, names) {
+		Scripts.foreach(action, function(name,value,names) {
+			if (name == "zoom") {
+				// XXX 特殊
+				names["zoomx"] = true;
+				names["zoomy"] = true;
+				return;
+			}	//不在actionParams中 且不以flag开头的属性名
+			if (!(actionParams[name] || (name.length > 4 && name.substr(0,4) == "flag")) &&	hasProperty(name)) {
+				names[name] = true;
+			}
+		},names);
+	} incontextof context;
+	var names = %[];
+	if (action instanceof "Dictionary") {
+		func(action, names);
+	} else if (action instanceof "Array") {
+		Scripts.foreach(action, function(id,action,names,func) {
+			if (action instanceof "Dictionary") {
+				if (action["default"] === void && action.loop === void && action.wait === void) {//排除default 和loop 和wait
+					func(action, names);
+				}
+			}
+		},names,func);
+	}
+	return Scripts.getObjectKeys(names);
+}
+
+/**
+ * アクションにかかる時間を返す		计算action花费的时间
+ * @param act アクション情報		动作信息
+ * @return アクションにかかる総時間		动作花费的总时间
+ */
+function calcActionTime(act)
+{
+	var time;
+	if (act instanceof "Array") {		//数组直接取值  或取得字典后递归取值
+		for (var i=0;i<act.count;i++) {
+			var ac = act[i];
+			if (typeof ac == "Integer") {
+				time = 0 if time === void;
+				time += ac;
+			} else if (ac instanceof "Dictionary") {
+				var t = calcActionTime(ac);
+				if (t !== void) {
+					time = 0 if time === void;
+					time += t;
+				}
+			}
+		}
+	} else if (act instanceof "Dictionary") {	//字典有time直接取值
+		if (act.time !== void) {
+			time = act.time;
+		} else {
+			var names = Scripts.getObjectKeys(act);
+			for (var i=0;i<names.count;i++) {		//否则循环所有键名取出值
+				var name = names[i];
+				var value = act[name];
+				if (value instanceof "Array") {		//如果取出值为数组，将所有元素作为字典取出所有time		
+					for (var i=0;i<value.count;i++) {
+						var v = value[i];
+						if (v instanceof "Dictionary" && v.time !== void) {
+							if (time === void) {
+								time = v.time;
+							} else if (v.time > time) {
+								time = v.time;
+							}
+						}
+					}
+				} else if (value instanceof "Dictionary" && value.time !== void) {	// 如果为字典则尝试取出time
+					if (time === void) {
+						time = value.time;
+					} else if (value.time > time) {
+						time = value.time;
+					}
+				}
+			}
+		}
+	}
+	return time;
+}
+
+/**
+ * 単独プロパティに対するアクション情報			单独属性的动作信息
+ * 絶対アクション：ターゲットプロパティの絶対値を指定する　　　　　１つしか使えない			绝对动作：指定目标属性的绝对值，只能使用一个
+ * 相対アクション：ターゲットプロパティに対する相対値を指定する　　複数指定できる  相对操作目标属性的相对值				可指定 多个
+ */
+class PropActionInfo {
+
+	var _target;			//	执行行为的目标对象
+	var _propName;      // プロパティ名		属性名
+	var _absolute;      // 絶対アクションハンドラ or 直値		绝对动作处理程序 或字面值
+	var _relative = []; // 相対アクションハンドラ				相对动作处理程序
+	var _nofast;        // 早送りしない			是否反应加速效果
+
+	var _first;         // 初回実行				是否第一次执行
+	var _done;          // 実行終了				是否执行结束
+
+	var value;			// 对应的属性值
+	
+	property done{
+		getter{
+			return _done;
+		}
+	}
+    /**
+	 * コンストラクタ		构造函数
+	 */
+	function PropActionInfo(target,propName,nofast) {
+		this._target = target;
+		this._propName = propName;
+		_first = true;
+		_done  = false;
+
+	 	_nofast = nofast;   
+	}
+	function finalize(){
+		while(_relative.count>0){
+			var temp = _relative.shift();
+			invalidate temp;
+		}
+		invalidate _absolute;
+	}
+
+	/** 
+	* @description: 重置动画，动画仍处于进行状态会失败
+	* @return 是否重置成功
+	*/
+	function next() {
+		if(!_done) return false;
+		_first = true;
+		_done  = false;
+		return true;
+	}
+
+    /**
+	 * アクションを追加する		增加动作	
+	 * @param elm.handler 非空		动作处理器或字面值
+	 * @param elm 初期化パラメータ
+     */
+	function addAction(elm) {
+		var handler = elm.handler;
+		if(!isBlank(global,handler)) handler = global[handler]; // 字符串的情况下
+		if (typeof handler == "Object" ) {
+			if (!isBlank(handler,"AbsoluteActionHandler")) {
+				_absolute = new handler(this, elm);
+			} else if (!isBlank(handler,"RelativeActionHandler")) {
+				// 相対アクションは複数設定可能		相对处理器可设置复数个
+				_relative.add(new handler(this, elm));
+			} else {
+				throw new Exception("the handler is not correct:" + handler);
+			}
+		} else if(!isBlank(handler)) {	// 字面值
+			_absolute = handler;
+		} else if (_absolute === void) {
+			_absolute = new DefaultAction(this,elm);
+		}
+    }
+
+	
+
+	/**
+	 * アクション初期化処理	action的初始化处理
+	 * 调用absolute和relative的init方法
+	 */
+	function doFirst() {
+		if (!_first) return;
+		if (typeof _absolute == "Object") {
+			_absolute.init();
+		} else if (!isBlank(_absolute)) {	// 这个是 absolute是字面值的情况
+			value = _absolute;
+		}
+		for (var i=0;i<_relative.count;i++) {
+			_relative[i].init();
+		}
+		_first = false;
+	}
+	
+	/**
+	 * アクション処理実行		执行action
+	 * @param _target ターゲットオブジェクト		目标对象
+	 * @param now 時間		时间
+	 * @param nowNoFast 時間		不反应时间加速的实际时间
+	 * @return 終了したら true		终止时为true
+	 */
+	function doAction(now, nowNoFast) {
+		if (_done)return true;
+		now = nowNoFast if _nofast;
+		value = getProperty(_target, _propName);
+		doFirst();
+		_done = true;
+		if (typeof _absolute == "Object") {
+			if (!_absolute.action(now)) {
+				_done = false;
+			}
+		}
+		for (var i=0;i<_relative.count;i++) {
+			if (!_relative[i].action( now)) {
+				_done = false;
+			}
+		}
+		setProperty(_target, _propName, value);
+		return _done;
+    }
+
+	/**
+	 * アクションの停止			停止动作
+	 * @param _target ターゲットオブジェクト		目标对象
+	 * @param all 強制停止		强制停止
+	 * @return 終了したら true		结束时为true
+	 */
+	function stopAction() {
+		if (_done)return true;
+		doFirst();
+		_done = true;
+		if (typeof _absolute == "Object") {
+			_absolute.action(0, true);
+		}
+		for(var i=0;i<_relative.count;i++){
+			_relative[i].action(0,true);
+		}
+		setProperty(_target, _propName, value);
+		return _done;
+	}
+
+	function store(){	 
+		var dic=%[
+			propName:_propName,
+			nofast:_nofast,
+			relative:[]
+		];
+		if(typeof _absolute == "Object")
+			dic.absolute=_absolute.store();
+		else dic.absolute=_absolute;
+		for(var i=0;i<_relative.count;i++){
+			dic.relative.add(_relative[i].store());
+		}
+		return dic;
+	}
+	function restore(dic){
+		_relative = [];
+		_absolute = void;
+		this._propName = dic.propName;
+		this._nofast = dic.nofast;
+		addAction(dic.absolute);
+		for(var i=0;i<dic.relative.count;i++){
+			addAction(dic.relative[i]);
+		}
+		next();
+	}
+};
+
+class BundleAction{
+	var _actionProps = %[];
+	var _target;
+	var _complete;
+	function BundleAction(target){
+		_target = target;
+	}
+	function finalize() {
+		foreach(_actionProps,function(k,v){
+			invalidate v;
+		});
+	}
+
+	property working {
+		getter{
+			var entrys = [];
+       		entrys.assign(_actionProps);
+			for(var i=0;i<entrys.count;i+=2){
+				if(!entrys[i+1].done)return true;
+			}
+			return false;
+		}
+	}
+	function setComplete(complete){
+		_complete = complete;
+	}
+	function doComplete() {
+		if(isBlank(_complete))return;
+		try {
+			_complete();
+		} catch (e) {
+			dm(@"error occur when complete function executing :${e.message}");
+		}
+	}
+
+	function addActions(dic,nofast){
+		foreach(dic,function(key,val,dic,nofast){
+			var action = _actionProps[key];
+			if (isBlank(action)){
+				action = new PropActionInfo(_target,key,nofast);
+				_actionProps[key] = action;
+			}
+			if(val instanceof "Array"){
+				for(var i=0;i<val.count;i++)
+					action.addAction(val[i]);
+			}
+			else action.addAction(val);
+		} incontextof this,nofast);
+	}
+
+	function next(){
+		if(working) return false;
+		foreach(_actionProps,function(k,v){
+			v.next();
+		});
+		return true;
+	}
+
+	function doAction(now, nowNoFast){
+		foreach(_actionProps,function(key,val,dic,now,nowNoFast){
+			val.doAction(now, nowNoFast);
+		} incontextof this,now,nowNoFast);
+		if (!working)
+			doComplete();
+		return !working;
+	}
+
+	function stopAction() {
+		foreach(_actionProps,function(key,val){
+			val.stopAction();
+		} incontextof this);
+		
+		doComplete();
+	}
+
+	function store(){
+		var dic = %[];
+		foreach(_actionProps,function(key,val,dic,param){
+			param[key] = val.store();
+		},dic);
+		return dic;
+	}
+
+	function restore(dic){
+		foreach(dic,function(key,val){
+			_actionProps[key] = new PropActionInfo(_target,key,null);
+			_actionProps[key].restore(val);
+		}incontextof this);
+	}
+}
+class ActionLoopInfo {
+
+	var _count; // ループ回数		循环次数
+	var _point; // ループ先ポイント	循环目标点
+
+	var count; //现在循环的次数
+	/**
+	 * コンストラクタ		构造方法
+	 */
+	function ActionLoopInfo(point, count) {
+		_point = point;
+		this.count = _count = count;
+	}
+	/** 
+	* @description: 恢复动作到最初状态，可进行下一次doLoop
+	* @return 
+	*/
+	function next(){
+		count = _count;
+	}
+
+    /**
+	 * ループ処理実行		执行循环
+	 * @return 戻り先差分(-1なら終了)		返回循环目标点，0时结束
+     */
+	function doLoop() {
+		if (_count === void) {
+			return +_point;
+		} else {
+			if (count-- <= 0) {
+				return 0;
+			}
+			return +_point;
+		}
+	}
+	function store(){
+		return %[loop:true,count:_count,point:_point];
+	}
+	function restore(dic){
+		_count = +dic.count;
+		_point = +dic.point;
+		next();
+	}
+};
+
+
+/**
+ * 特定プロパティに対する一連のアクション情報		特定属性的一组操作信息
+ * ・通常のアクション指定		指定常规操作
+ * ・連続アクション指定			指定连续操作
+ * それぞれを保持する。			各自保持。
+ * 通常のアクション指定はプロパティ単位で重ね合わせされて、同一プロパティに対する操作は後発のアクションでで上書きされます	通常的操作指定以属性为单位重合，对同一属性的操作由后续的动作覆盖
+ * 
+ * 一次只能执行一个连续动作，
+ */
+class ActionSequense {
+	var _startTime = 0;		// 单独记录每个动作的时间
+
+	var _actions = []; // 連続実行中のアクション		连续执行中的动作
+	var _complete;     // 終了時ハンドラ			终止时处理器
+	var _target;     // 行为的对象
+	
+	var _cur = 0 ;    // 現在実行中のアクション位置		当前执行中的动作位置
+	
+	property isLoop{	// 0代表不是loop 整数代表循环次数 -1 代表无限循环
+		getter{
+			var cnt = 0;
+			for(var i=0;i<_actions.count;i++){
+				if(!(_actions[i] instanceof "ActionLoopInfo"))
+					continue;
+				if(isBlank(_actions[i].count))return -1;
+					cnt += _actions[i].count;
+			}
+			return cnt;
+		}
+	}
+
+	property working {
+		getter() {
+			return _cur < _actions.count;
+		}
+	}
+
+	/**
+     * コンストラクタ		构造方法
+	 */
+	function ActionSequense(target) {
+		_target = target;
+    }
+
+	function finalize() {
+		while (_actions.count > 0) {
+			var action = _actions.shift();
+			invalidate action;
+		}
+	}
+	
+
+    // -----------------------------------------------
+
+	function _addLoop(index,point, count) {
+		_actions[index] = new ActionLoopInfo(point, count);
+	}
+	// action: %[propName:%[handler:'',time:'']]
+	function addAction(index,action){
+		index = +index;
+		if(action.loop == true){
+			_addLoop(index,action.point, action.count);
+		}else
+		{
+			var bundle = _actions[index];
+			if(isBlank(bundle)){
+				bundle = _actions[index] = new BundleAction(_target);
+			}
+			var nofast = action.nofast;
+			delete action.nofast;
+			bundle.addActions(action,nofast);
+		}
+			
+	}
+	function addActionList(list) {
+		var count = list.count;
+		for(var i=0;i<count;i++)
+		{
+			addAction(_actions.count,list[i]);	
+		}
+	}
+
+	// 終了時処理を追加		添加结束时的处理
+	function setComplete(complete) {
+		_complete = complete;
+	}
+	
+    // -----------------------------------------------
+
+	function _doComplete() {
+		if (!isvalid _target)return;
+		if (_complete !== void) {
+			try {
+				_complete();
+			} catch (e) {
+				dm(@"error occur when _complete function executing _complete :${e.message}");
+			}
+		}
+	}
+	
+    /**
+	 * アクション実行		执行动作
+	 * @param now 現在時刻		现在的时间
+	 * @param drawSpeed  绘制时间倍率	0代表瞬时
+	 * @param 全アクションが終了したら true	全部action均结束则为真
+     */
+	function doAction(now,drawSpeed = 1) {
+		if(!working) return true;
+		if(0 == _startTime) _startTime = now;
+
+		var nowNoFast = now - _startTime; 
+		if(drawSpeed <= 0)
+		{
+			stopAction(true);
+			return true;
+		}
+		now = nowNoFast / drawSpeed;
+		var action = _actions[_cur];
+		if (action instanceof "ActionLoopInfo") {
+			var loop = action.doLoop();
+			if (loop > 0) {
+				_cur -= loop;
+			} else {
+				action.next();
+				_cur++;
+			}
+			_startTime  = 0;
+		} else if (action.doAction(now, nowNoFast)) {
+			action.next() if(isLoop); // 仅循环动画自动重置
+			_cur++;
+			_startTime  = 0;
+		}
+		
+		if(!working) {
+			_doComplete();
+			return true;
+		}
+		return false;
+	}
+
+	/** 
+	* @description: 恢复动作到最初状态，可进行下一次doAction
+	* @return 是否成功，动画还处于进行状态会失败
+	*/
+	function next(){
+		if(working)return false;
+		for(var i=0;i<_actions.count;i++){
+			_actions[i].next();
+		}
+		_startTime  = _cur = 0;
+		return true;
+	}
+	/**
+	 * @description: 全体アクションを停止		停止全部动作
+	 * @param force 是否强制停止（也会停止无限循环）
+	 * @return 
+	 */
+	function stopAction(force) {
+		if(isLoop == -1 && !force)return false;
+		if(!working)return false;
+		while (_cur < _actions.count) {
+			var action = _actions[_cur];
+			if (action instanceof "BundleAction") {
+				action.stopAction();
+			}
+			_cur++;
+		}
+		_doComplete();
+		return true;
+	}
+
+	/**	
+	 * 存档
+	 */
+	function store() {
+		var dic=[];
+		for (var i=0;i<_actions.count;i++) {
+			dic.push(_actions[i].store());
+		}
+		return dic;
+	}
+	function restore(arr){
+		for (var i=0;i<arr.count;i++) {
+			if(arr[i].loop){
+				_addLoop(i,arr[i].point,arr[i].count);
+			}
+			else{
+				_actions[i] = new BundleAction(_target);
+				_actions[i].restore(arr[i]);
+			}
+		}
+	}
+};
+
+
+/**
+ * アクション処理基礎構造		动作处理基类
+ * addAction是添加动画的基本方法
+ * actionlist的写法是:
+ * [ {prop1(动画操作的属性1):[{},{}]/{handler:(动画的处理器,必须),time:}(可为数组或单个字典,数组情况只能有一个绝对处理器，其余都是相对处理器),
+ *  prop2(动画操作的属性2):,nofast(特殊属性，决定是否使用动画加速):true/false}(单个动画阶段),
+ *  {loop:true/fasle}(指定动画如何循环) .....(其余的动画阶段)] 
+ * 例如:[
+ *  %[left:[%[handler:MoveAction,time:"2000",value:100,start:0]],top:%[handler:MoveAction,time:"2000",value:"@+50"],nofast:"false"],
+ *  %[left:%[handler:WaitAction,value:"@",time:2000],nofast:true],
+ *  %[loop:true,point:2,count:2]]
+ */
+
+class ActionBase {
+
+	// アクション対象全部		全部动作对象 	
+	var _allActions = %[];
+	var _waittingAction = %[];	// 处于等待状态，还未开始的动画 
+	function ActionBase() {
+	}
+
+	function finalize() {
+		System.removeContinuousHandler(actionHandler);
+		foreach(_allActions,function(k,v){
+			invalidate v;
+		});
+	}
+	
+	// ---------------------------------------------------------------
+	
+	/** 
+	* @description: 指定的动画是否为循环动画 
+	* @param name 动画名称
+	* @return 是否为循环动画 
+	*/
+	function isLoopAction(name){
+		if(isBlank(_allActions,name))
+			return false;
+		return -1 == _allActions[name].isLoop;
+	}
+	/** 
+	* @description: 指定的动画是否在动作中 
+	* @param name 动画名称，指定空则获取是否存在工作中的动作
+	* @return 是否在进行中 
+	*/
+	function isWorkingAction(name) {
+	
+		if(isBlank(name)){
+			var entrys = [];
+       		entrys.assign(_allActions);
+			for(var i=0;i<entrys.count;i+=2){
+				if(entrys[i+1].working)return true;
+			}
+			return false;
+		}
+		else if(!isBlank(_waittingAction[name]))return false;
+		else if( isBlank(_allActions[name]) ) return false;	// 可能被删除
+		else return _allActions[name].working;
+	}
+
+	/**
+	 * @description: 指定したプロパティのアクションを破棄		丢弃指定的动画
+	 * @param name	动画名称,为空则删除全部
+	 */
+	function delAction(name) {
+		if(isBlank(_allActions,name))
+			return false;
+		if(isBlank(name)){	// 删除全部
+			foreach(_allActions,function(name,ac){
+				var work = ac.working;
+				ac.stopAction(true);
+				onActionComplete(name) if work;
+				invalidate ac;
+			} incontextof this);
+			_allActions = %[];
+			_waittingAction = %[];
+			onAllActionComplete();
+			return true;
+		}
+		else {	// 删除单个
+			var isSingleWork = isWorkingAction(name);
+			var isWork = isWorkingAction();
+
+			_allActions[name].stopAction();
+			invalidate _allActions[name];
+			delete _allActions[name];
+			delete _waittingAction[name];
+			if(isSingleWork)
+				onActionComplete(name);
+
+			if(isWork && !isWorkingAction())
+				onAllActionComplete();
+			return true;
+		}
+	}
+
+	/**
+	 * @description: 增加动画,注意即使指定立即开始且总时间为0,也会在下次可以触发事件时开始动画，导致属性不会立即变化，想要立即结束请使用stopAction
+	 * @param name	动画对应的名称	
+	 * @param immediate	是否立即开始
+	 * @param actionList アクションリスト			动作列表
+	 */
+	function addAction(name, immediate,actionList) {
+		if(!isBlank(_allActions,name)) {
+			throw new Exception("already has action with same name",Scripts.getTraceString());
+		}
+		_allActions[name] = new ActionSequense(this);
+		_allActions[name].addActionList(actionList);
+		if(immediate)
+			System.addContinuousHandler(actionHandler); // 多次add也是一样的，所以没事
+		else _waittingAction[name] = true;
+
+	}
+	
+	/**
+	 * 	注册指定动画结束时的 函数
+	 * @param name		动画名
+	 * @param complete 終了時関数			结束时的函数
+	 */
+	function setActionComplete(name,complete) {
+		var info = _allActions[name];
+		if ( !isBlank(info) ) {
+			info.setComplete(complete);
+		}
+	}
+
+
+	/**
+     * アクションを停止		停止动作
+     * @param target ターゲットオブジェクト	目标对象
+	 * @param force 是否强制停止循环的动作
+	 */
+	function stopAction(name, force = false) {
+		if(!isBlank(name)){
+			delete _waittingAction[name];
+			if(isBlank(_allActions[name]))
+				return false;
+			if(_allActions[name].stopAction(force))
+			{
+				onActionComplete(name);
+				return true;
+			}
+			else return false;
+		}
+		else {
+			_waittingAction =%[];
+			foreach(_allActions,function(name,ac,dic,force){
+				var work = ac.working;
+				ac.stopAction(force);
+				if(work && !ac.working) onActionComplete(name);
+			} incontextof this,force);
+
+		}
+		
+	}
+
+	/** 
+	* @description: 重置某个动画
+	* @param name	动画名称，为空则指定全部
+	* @return 
+	*/
+	function resetAction(name){
+		if(!isBlank(name)){	// 重置单个
+			if(isBlank(_allActions[name]))
+				return;
+			_allActions[name].next();
+		}else{				// 重置全部
+			foreach(_allActions,function(k,v){
+				if(!v.working)
+					v.next();
+			});
+		}
+	}
+
+	function startAction(name){
+		if(isBlank(name)){
+			_waittingAction=%[];
+		}
+		else{
+			delete _waittingAction[name];
+		}
+		System.addContinuousHandler(actionHandler); // 多次add也是一样的，所以没事
+	}
+
+	function actionHandler(time){
+		if(isBlank(this) || isBlank(kag))return;
+		var ds = isBlank(kag)?window.drawspeed:kag.drawspeed;
+		foreach(_allActions,function(k,v,dic,time,speed){
+			if(_waittingAction[k])return;
+			if(v.doAction(time,speed))
+				onActionComplete(k);
+		} incontextof this,time,ds);
+		
+		if(!isWorkingAction()) // 全部动画结束
+			onAllActionComplete();
+    }
+
+	
+	/** abstract
+	* @description: 动画完成时触发，需要子类覆盖,感觉这个方法有点重复，
+	* 可以用 setActionComplete 替代，暂时先留着吧
+	* @param name	动画名称
+	* @return 
+	*/
+	function onActionComplete(name){
+		if(isBlank(this))return;
+		kag.onAnimationStopped(this,name);
+	}
+
+	function onAllActionComplete(){
+		System.removeContinuousHandler(actionHandler);
+	}
+
+	// 存储所有动画
+	function store(){
+		var dic = %[];
+		foreach(_allActions,function(k,v,dic,param){
+			if(v.working) 	// 结束的动画不会存储
+				param[k] = v.store();
+		},dic);
+		return dic;
+	}
+
+	function restore(dic){// 只会执行循环状态的动画，其他动画全部处于待机状态（无论存档时状态如何）
+		delAction();
+		foreach(dic,function(name,ac){
+			_allActions[name] = new ActionSequense(this);
+		 	_waittingAction[name] = true;
+			_allActions[name].restore(ac);
+			if(isLoopAction(name))//仅执行循环动画
+				startAction(name);
+		} incontextof this);
+	}
+ 	
+}
+
+/*
+测试用的语句
+kag.drawspeed = 5;
+kag.fore.base.addAction("test",true,[
+    %[left:[%[handler:MoveAction,time:"2000",value:100,start:0]],top:%[handler:MoveAction,time:"2000",value:"@+50"],nofast:"false"],
+    %[left:%[handler:WaitAction,value:"@",time:2000],nofast:true],
+    %[loop:true,point:2,count:2]]);
+*/
+// ----------------------------------------------------------------
+// ハンドラクラス		处理器类
+// ----------------------------------------------------------------
+
+/**
+ * アクションハンドラ基底クラス		处理器的基类
+ * 通用的参数
+ * @param time	时间
+ * @param delay 延迟时间 
+ */
+class ActionHandler {
+	var _target;  // 更新的目标对象
+	var _time;  // 駆動時間			行为持续的总时间
+	var _delay; // 開始遅延時間		延迟时间，可以指定延迟多久才开始
+	var _starttime; // 開始時間		开始时间，可以指定行为从第几时刻开始
+	var _speed; // スピード補正			速度补正 
+	var _mag; // アクション拡大補正値		动作放大修正值（用到的子类只有两个（好像））
+	
+    /**
+     * コンストラクタ		构造方法
+     * @param target 対象オブジェクト		目标对象
+	 * @param elm 初期化パラメータ			初始化参数
+	 */
+	function ActionHandler(target, elm) {
+		_target = target;
+		_time  = +elm.time if elm.time !== void;
+		_delay = +elm.delay if elm.delay !== void;
+		_starttime = elm.starttime !== void ? +elm.starttime : 0;
+		_speed = elm.speed !== void ? +elm.speed : 1.0;
+		_mag = elm.mag !== void ? +elm.mag : 1.0;
+    }
+
+	
+	/**
+	 * 実行初回処理		初次处理
+	 */
+	function init() {
+	}
+
+	
+    /**
+     * 実行処理ベース		动作处理基础方法
+     * @param now 駆動時間				驱动的时间,这里的是以0开始的
+     * @param stopFlag 停止フラグ		停止标志
+     * @return 終了したら true			执行完成则为true
+     */
+	function action(now, stopFlag = false) {
+        if (!stopFlag && _delay !== void) {
+            now -= _delay;
+            if (now < 0) {
+                return false;
+            }
+		}
+		now += _starttime;
+		now *= _speed;
+		return doAction(now, stopFlag || (_time !== void && now > _time));
+    }
+    
+    /**
+     * アクション実行		执行动作
+     * @param now 駆動時間		驱动的时间
+     * @param stopFlag 停止フラグ		停止标志
+     * @return 終了したら true		执行完成则为true
+     */
+	function doAction(now, stopFlag) {
+        // それぞれのアクションで実装		各自实现
+		return stopFlag;
+    }
+	function store(){
+		return %[handler:"",time:_time,delay:_delay,starttime:_starttime,speed:_speed,mag:_mag];
+	}
+}
+
+/**
+ * 絶対動作アクション基底クラス		绝对动作基类
+ * 値を維持するアクション		
+ */
+class AbsoluteActionHandler extends ActionHandler {
+	function AbsoluteActionHandler(target, elm) {
+		super.ActionHandler(target, elm);
+    }
+};
+
+/**
+ * 相対アクション基底クラス		相对动作基类
+ */
+class RelativeActionHandler extends ActionHandler {
+    function RelativeActionHandler(target, elm) {
+		super.ActionHandler(target, elm);
+    }
+};
+
+/**
+ * 値初期化アクション		值初始化action		默认的绝对类行为处理器
+ * 相対アクションのみの場合にベースの値を維持するために使う		只有相对动作时维持基础类的值时使用
+ */
+class DefaultAction extends AbsoluteActionHandler {
+    var _initValue;
+    function DefaultAction(target, elm) {
+		super.AbsoluteActionHandler(target, elm);
+    }
+
+	function doAction(now, stopFlag) {
+		_initValue = _target.value;
+		_target.value = getRelative(_initValue, _target.value);
+        return stopFlag;
+    }
+	function store(){
+		var dic = super.store();
+		dic.handler = "WaitAction";
+		// dic.value = _initValue;
+		return dic;
+	}
+}
+
+/** 
+ * @description: 相等于一个别名类
+ * 等待固定时间
+ */
+class WaitAction extends DefaultAction {	
+	function WaitAction(target, elm) {
+		super.DefaultAction(target, elm);
+    }
+}
+
+/**
+ * 基本移動アクション（絶対アクション）		基本移动动作
+ * @param start 初期値指定(未指定時は現在の値)		指定初始值，未指定时为现在的值
+ * @param value 設定値		设置值
+ * @param accel 加速度指定		设置加速度
+ *  文字列指定		指定字符串
+ *   "accel" 加速	加速
+ *   "decel" 減速	
+ *   "acdec" 加減速
+ *   "accos" コサインカーブ		cos曲线
+ *   "const" 等速
+ *  関数指定	指定函数
+ *   そのまま移動関数として指定可能			可以直接指定移动函数
+ *   function move(t); t,帰り値 いずれも時間指定 0～1.0	返回值指定0～1.0的时间
+ */
+class MoveAction extends AbsoluteActionHandler {	// 因为使用了移动函数，仅能处理数值型动画
+
+	var _setStart;		//手动指定起点值
+	var _initValue;     // 終点指定		指定终点，可以指定相对值
+	var _accel;  // 记录函数的字符串（如果非字符串则无法恢复）
+	var _moveFunc;  // 移動関数		移动函数
+	//---------------下面的是会进行变动的参数-----------------------
+	var _start;		//起始值
+	var _value;     // init之后获取的实际终点（相对值会计算出来绝对值）
+	var _diff;      // 移動差分
+    
+    function MoveAction(target, elm) {
+		super.AbsoluteActionHandler(target, elm);
+		_initValue = elm.value;
+		_setStart = elm.start;
+		_moveFunc = getMoveFunc(_accel = elm.accel);
+	}
+	// 加速関数を決定 (※KAGLayerのtransition tick callback決定からも使用されるので注意)
+	function getMoveFunc(accel) {
+		var moveFunc;
+		if (typeof accel == "String") {
+			// accelに渡された文字で移動関数を決定
+			switch (accel.toLowerCase()) {
+			case "accel": moveFunc = getAccelMove; break;
+			case "decel": moveFunc = getDecelMove; break;
+			case "acdec": moveFunc = getAcDecMove; break;
+			case "accos": moveFunc = getAcCosMove; break;
+			case "const": moveFunc = getConstMove; break;
+			}
+		} else if (typeof accel == "Object" && accel instanceof "Function") {
+			moveFunc = accel; // accelが関数ならそのまま移動関数として使用する
+		}else moveFunc = getConstMove; // 默认等速
+		return moveFunc;
+	}
+	
+	/**
+	 * 実行初回処理
+	 */
+	function init() {
+		if(isBlank(_setStart))	// 未指定初始值为当前值
+			_start = _target.value;
+		else _start = _setStart; // 指定则手动设置值
+		_value = getRelative(_initValue, _start);
+		_diff = _value - _start;
+	}
+
+	function doAction(now, stopFlag) {
+		if (_time == 0 || stopFlag) {
+			_target.value = _start + _diff;
+			return true;
+		} else {
+			_target.value= _start + _diff * _moveFunc(now/_time);
+			return false;
+		}
+	}
+	function getConstMove(t) { return t; }             //等速度
+	function getAccelMove(t) { return t*t; }           //加速
+	function getDecelMove(t) { return t*(2-t); }       //減速 == 1-(1-t)*(1-t);
+	function getAcDecMove(t) { return (t*t*(3-2*t)); } //加減速
+	function getAcCosMove(t) { return (1-Math.cos(t*Math.PI))/2; } //加減速(cos使用)
+	function store(){
+		var dic = super.store();
+		dic.handler = "MoveAction";
+		dic.value = _initValue;
+		dic.start = _setStart;
+		dic.accel = _accel;
+		return dic;
+	}
+}
+/** 
+ * @description: 可处理字符串型参数的路径式处理器
+ * 初始化参数 path需要以逗号分割全部的参数
+ */
+class StringPathAction extends AbsoluteActionHandler{
+	var _setStart;		//手动指定起点值
+	var _path;     // 路径的数值
+    var path = [];
+    function StringPathAction(target, elm) {
+		super.AbsoluteActionHandler(target, elm);
+		_path = elm.path;
+		_setStart = elm.start;
+	}
+	
+	/**
+	 * 実行初回処理
+	 */
+	function init() {
+		path = _path.split(",");
+		if(isBlank(_setStart))	// 未指定则起点为当前值
+			path.unshift(_target.value);
+		else path.unshift(_setStart); // 指定则手动设置值
+	}
+
+	function doAction(now, stopFlag) {
+		if (_time == 0 || stopFlag) {
+			_target.value = path[path.count-1];
+			return true;
+		} else {
+			_target.value = path[(path.count-1) * now\_time];
+			return false;
+		}
+	}
+	function store(){
+		var dic = super.store();
+		dic.handler = "StringPathAction";
+		dic.path = _path;
+		dic.start = _setStart;
+		return dic;
+	}
+}
+/**
+ * 複数点移動アクション（絶対アクション）
+ * @param 
+ */
+class PathAction extends MoveAction {
+
+	function PathAction(target, elm) {
+		super.MoveAction(target, elm);
+	}
+
+	// 移動用パラメータ生成			生成移动路径
+	function createValue(value, initValue) {
+		var ret;
+		if (value.indexOf(",") >= 0){
+			ret = value.split(",");
+			for (var i=ret.count-1;i>=0;i--) {
+				ret[i+1] = getRelative(ret[i], initValue);
+			}
+			ret[0] = void;
+		} else {
+			ret = [void, getRelative(value, initValue)];
+		}
+		return ret;
+	}
+	
+	/**
+	 * 実行初回処理
+	 */
+	function init(target) {
+		if (setstart !== void) {
+			value[0] = setstart;
+		} else {
+			value[0] = target.getValue();
+		}
+	}
+
+	function doAction(target, now, stopFlag) {
+		if (time == 0 || stopFlag) {
+			target.setValue(value[value.count-1]);
+			return true;
+		} else {
+			var l = value.count - 1;
+			var t = moveFunc(now/time) * l;
+			var n = (int)t;
+			var tdiff = t - n;
+			var diff  = n >= l ? 0 : value[n+1] - value[n];
+			target.setValue(value[n] + diff * tdiff);
+			return false;
+		}
+	}
+}
+
+/**
+ * 二次関数移動アクション（絶対アクション）
+ * ※指定にかかわらず xpos/ypos 操作
+ */
+class ParabolaMoveAction extends AbsoluteActionHandler {
+
+    var t0;
+    var start_x;  // 開始時の値
+    var start_y;
+    var diff_x;
+    var diff_y;
+
+    function ParabolaMoveAction(target, elm) {
+		super.AbsoluteActionHandler(target, elm);
+		start_x = target["xpos"];
+		start_y = target["ypos"];
+		diff_x  = (+elm.x - start_x);
+		diff_y  = (+elm.y - start_y);
+		t0 = elm.toptime !== void ? (elm.toptime * 2) : time;
+    }
+
+	function doAction(target, now, stopFlag) {
+        if (t0) {
+            // X軸は等速移動、Y軸は2次関数移動
+            var t = now*2/t0;
+            // 原点と(1,1)を通り、逆U字型のカーブを描く2次関数
+			var n = ( 1-(1-t)*(1-t) );
+			target.target.setPos(start_x + diff_x*t, start_y + diff_y*n);
+        }
+        return stopFlag;
+    }
+}
+
+/**
+ * ループ移動アクション（絶対アクション）
+ * @param start 開始位置（未指定時は現在値)
+ * @param min ループ最少値
+ * @param max ループ最大値
+ * @param loop ループ時間
+ */
+class LoopMoveAction extends AbsoluteActionHandler {
+
+	var initValue; // 初期時の値
+	var setstart;     // 始点指定 
+	var setmin;
+	var setmax;
+	var start;
+	var min;       // ループ最少値
+	var max;       // ループ最大値
+	var loop;      // ループ時間
+
+	/**
+	 * コンストラクタ
+	 */
+    function LoopMoveAction(target, elm) {
+		super.AbsoluteActionHandler(target, elm);
+		initValue = target.getValue();
+		if (elm.start !== void) {
+			setstart  = getRelative(elm.start, initValue);
+		}
+		setmin    = getRelative(elm.min, initValue);
+		setmax    = getRelative(elm.max, initValue);
+		loop   = elm.loop !== void ? +elm.loop : time;
+    }
+
+	/**
+	 * 実行初回処理
+	 */
+	function init(target) {
+		if (setstart !== void) {
+			start = setstart;
+		} else {
+			start = target.getValue();
+		}
+		min = setmin;
+		max = setmax;
+		max   -= min;
+		start -= min;
+	}
+	
+	function doAction(target, now, stopFlag) {
+		if (stopFlag) {
+			return true;
+		} else {
+			target.setValue(min + (start + max * (now%loop) / loop) % max);
+			return false;
+        }
+    }
+}
+
+
+/**
+ * 振動アクション（相対アクション）
+ * value : 振動量
+ * offset    : 偏移量
+ */
+class VibrateAction extends RelativeActionHandler {
+
+    var _vibration;
+    var _offset;
+
+    function VibrateAction(target, elm) {
+		super.RelativeActionHandler(target, elm);
+		_vibration  = elm.value * _mag;
+		_offset    = elm.offset;
+    }
+	function store(){
+		var dic = super.store();
+		dic.value = _vibration;
+		dic.offset = _offset;
+		return dic;
+	}
+};
+
+/**
+ * ランダム振動アクション（相対アクション）
+ * vibration : 振動量
+ * offset    : 補正値
+ * seed: 种子
+ */
+class RandomAction extends VibrateAction {
+	var _rand;
+    var _randomValue;
+    var _seed;
+    function RandomAction(target, elm) {
+        super.VibrateAction(target, elm);
+		if (elm.seed !== void) {
+			_rand = new Math.RandomGenerator(elm.seed * 0xffffffff);
+			_seed = elm.seed;
+		} else {
+			_rand = new Math.RandomGenerator();
+		}
+    }
+
+	function init() {
+		_randomValue = 0;
+	}
+	
+	function doAction(now, stopFlag) {
+        if (stopFlag) {
+            return true; 
+        } else {
+			_randomValue = (_rand.random() * _vibration * 2 - _vibration) + _offset;
+			_target.value += _randomValue;
+            return false;
+        }
+    }
+	function store(){
+		var dic = super.store();
+		dic.seed = _seed;
+		dic.handler = "RandomAction";
+		return dic;
+	}
+};
+
+/**
+ * 矩形波
+ * vibration : 振動量
+ * offset    : 補正値
+ * ontime  : ONの時間   値:vibration
+ * offtime : OFFの時間  値:-vibration
+ */
+class SquareAction extends VibrateAction {
+
+    var ontime;
+    var offtime;
+
+    function SquareAction(target, elm) {
+        super.VibrateAction(target, elm);
+		ontime  = +elm.ontime if elm.ontime !== void;
+		offtime = +elm.offtime if elm.offtime  !== void;
+    };
+
+	function doAction(target, now, stopFlag) {
+        if (stopFlag) {
+            return true;
+        } else {
+			target.setValue(target.getValue() + ((now % (ontime + offtime) < ontime) ? vibration : -vibration) + offset);
+            return false;
+        }
+    }
+};
+
+/**
+ * 三角波
+ * vibration : 振動量
+ * offset    : 補正値
+ * 0～vibration を繰り返す
+ * ontime  : 上昇時間
+ * offtime : 加工時間
+ */
+class TriangleAction extends VibrateAction {
+
+    var ontime;
+    var offtime;
+
+    function TriangleAction(target, elm) {
+        super.VibrateAction(target, elm);
+        ontime  = +elm.ontime if elm.ontime !== void;
+        offtime = +elm.offtime if elm.offtime  !== void;
+    };
+
+	function doAction(target, now, stopFlag) {
+        if (stopFlag) {
+            return true;
+        } else {
+            now = now % (ontime + offtime);
+            var v;
+            if (now <= ontime) {
+                v = vibration * now / ontime;
+            } else {
+                if (offtime > 0) {
+                    v = vibration * (offtime - (now - ontime)) / offtime;
+                } else {
+                    v = 0;
+                }
+            }
+			target.setValue(target.getValue() + v + offset);
+            return false;
+        }
+    }
+};
+
+/**
+ * 三角関数振動アクション（相対アクション）
+ * vibration : 振動量
+ * offset    : 補正値
+ * cycle     : 周期(ms)
+ * angvel    : 角速度(度/sec) ※cycle指定時は無効
+ */
+class TrigonoAction extends VibrateAction {
+    
+    var cycle;
+    var angvel;
+    
+    function TrigonoAction(target, elm) {
+        super.VibrateAction(target, elm);
+        cycle  = +elm.cycle if elm.cycle !== void;
+        angvel = +elm.angvel if elm.angvel !== void;
+	}
+
+    function getAngle(now) {
+        return (cycle !== void) ? (Math.PI * 2 * now / cycle) : (Math.PI * 2 * now * angvel / 360000.0);
+    }
+};
+
+/**
+ * sin振動アクション（相対アクション）
+ * vibration : 振動量
+ * offset    : 補正値
+ * cycle     : 周期(ms)
+ * angvel    : 角速度(度/sec) ※cycle指定時は無効
+ */
+class SinAction extends TrigonoAction {
+
+    function SinAction(target, elm) {
+        super.TrigonoAction(target, elm);
+    }
+	function doAction(target, now, stopFlag) {
+        if (stopFlag) {
+            return true;
+        } else {
+			target.setValue(target.getValue() + vibration * Math.sin(getAngle(now)) + offset);
+            return false;
+        }
+    }
+}
+
+/**
+ * cos振動アクション（相対アクション）
+ * vibration : 振動量
+ * offset    : 補正値
+ * cycle     : 周期(ms)
+ * angvel    : 角速度(度/sec) ※cycle指定時は無効
+ */
+class CosAction extends TrigonoAction {
+
+    function CosAction(target, elm) {
+        super.TrigonoAction(target, elm);
+    }
+    function doAction(target, now, stopFlag) {
+        if (stopFlag) {
+            return true;
+        } else {
+			target.setValue(target.getValue() + vibration * Math.cos(getAngle(now)) + offset);
+            return false;
+        } 
+    }
+}
+
+/**
+ * 落下アクション
+ * distance 落下量
+ * time 落下時間
+ */
+class FallAction extends RelativeActionHandler {
+
+    var distance;
+    var fallTime;
+    
+    function FallAction(target, elm) {
+        super.RelativeActionHandler(target, elm);
+        distance = +elm.distance;
+    }
+
+	function doAction(target, now, stopFlag) {
+        if (stopFlag) {
+            return true;
+        } else {
+			//dm("fall:" + now);
+			target.setValue(target.getValue() + distance * (now/time - 1.0));
+            return false;
+        }
+    }
+};
+
+/**
+ * 単発パターン指定アクション
+ * fliptime フレーム時間
+ * pattern 切り替えパターン指定
+ */
+class FlipAction extends AbsoluteActionHandler {
+
+	var flipTime;
+	var pattern;
+	var resultValue;
+	var cur;
+	var nextTime;
+	var disable;
+
+	function FlipAction(target, elm) {
+		super.AbsoluteActionHandler(target, elm);
+		disable = elm.disable;
+		flipTime = elm.fliptime !== void ? +elm.fliptime : 60;
+		pattern = [2,1,0];
+		if (elm.pattern !== void) {
+			if (elm.pattern == "eye") {
+				pattern = [0,1,2];
+			} else if (elm.pattern == "lip") {
+				pattern = [1,2,0];
+			} else if (elm.pattern.indexOf(",") > 0) {
+				pattern = elm.pattern.split(",");
+				for (var i=0;i<pattern.count;i++) {
+					pattern[i] = +pattern[i];
+				}
+			}
+		}
+		resultValue = pattern[pattern.count-1];
+		next();
+    }
+
+	function next() {
+		cur = 0;
+		nextTime = 0;
+	}
+	
+	function doAction(target, now, stopFlag) {
+		if (stopFlag || (!(disable == "" || !sf[disable]))) {
+			target.setValue(resultValue);
+			return true; 
+		} else {
+			if (now >= nextTime) {
+				if (cur < pattern.count) {
+					target.setValue(pattern[cur++]);
+				} else {
+					return true;
+				}
+				nextTime += flipTime;
+			}
+			return false;
+        }
+    }
+};
+
+/**
+ * ランダムパターン指定アクション
+ * fliptime フレーム時間
+ * flipfreq 頻度(1秒あたり何回程度か)
+ * pattern 切り替えパターン指定
+ */
+class RandomFlipAction extends AbsoluteActionHandler {
+
+	var rand;
+	var flipTime;
+	var flipFreq;
+	var pattern;
+	var resultValue;
+	var cur;
+	var nextTime;
+	var disable;
+	var flipValue;
+
+	function RandomFlipAction(target, elm) {
+		super.AbsoluteActionHandler(target, elm);
+
+		if (elm.seed !== void) {
+			rand = new Math.RandomGenerator(elm.seed * 0xffffffff);
+		} else {
+			rand = new Math.RandomGenerator();
+		}
+
+		disable = elm.disable;
+
+		// 文字列の場合システムフラグを参照する処理
+		//flipTime = elm.fliptime !== void ? +elm.fliptime : 60;
+		var flipTimeDefault = 60;
+		switch (typeof elm.fliptime) {
+		case "Interger":
+		case "Real":
+			flipTime = +elm.fliptime;
+			break;
+		case "String":
+			flipTime = sf[elm.fliptime] !== void ? +sf[elm.fliptime] : flipTimeDefault;
+			break;
+		default:
+			flipTime = flipTimeDefault;
+			break;
+		}
+
+		//flipFreq = elm.flipfreq !== void ? +elm.flipfreq : 1;
+		var flipFreqDefault = 1;
+		switch (typeof elm.flipfreq) {
+		case "Interger":
+		case "Real":
+			flipFreq = +elm.flipfreq;
+			break;
+		case "String":
+			flipFreq = sf[elm.flipfreq] !== void ? +sf[elm.flipfreq] : flipFreqDefault;
+			break;
+		default:
+			flipFreq = flipFreqDefault;
+			break;
+		}
+		//dm(@"${target.name}:RandomAction params flipfreq:${flipFreq} fliptime:${flipTime}");
+		
+		flipFreq = flipFreq * flipTime / 1000.0;
+		pattern = [2,1,0];
+		if (elm.pattern !== void) {
+			if (elm.pattern == "eye") {
+				pattern = [0,1,2];
+			} else if (elm.pattern == "lip") {
+				pattern = [1,2,0];
+			} else if (elm.pattern.indexOf(",") > 0) {
+				pattern = elm.pattern.split(",");
+				for (var i=0;i<pattern.count;i++) {
+					pattern[i] = +pattern[i];
+				}
+			}
+		}
+		resultValue = pattern[pattern.count-1];
+		next();
+    }
+
+	function next() {
+		cur = void;
+		nextTime = 0;
+		flipValue = void;
+	}
+	
+	function doAction(target, now, stopFlag) {
+		if (stopFlag) {
+			target.setValue(resultValue);
+			return true; 
+		} else {
+			if (disable == "" || !sf[disable]) {
+				if (now >= nextTime) {
+					if (cur === void) {
+						if (rand.random() < flipFreq) {
+							cur = 0;
+						}
+					} else {
+						// パターンを適用
+						if (cur < pattern.count) {
+							flipValue = pattern[cur++];
+						} else {
+							cur = void;
+							flipValue = void;
+						}
+					}
+					nextTime = now + flipTime;
+				}
+				if (flipValue !== void) {
+					target.setValue(flipValue);
+				}
+			} else {
+				// 最終状態で固定
+				target.setValue(resultValue);
+			}
+			return false;
+        }
+    }
+};
+
+/**
+ * 変数コピーアクション
+ * プロパティをオブジェクトの規定のコピー元からコピーするアクション
+ * 個別オブジェクトに copyValue メソッドがある場合のみ機能する
+ * from コピー元指定
+ * delay 反映の遅延指定
+ */
+class CopyValueAction extends AbsoluteActionHandler {
+
+	var initValue;
+	var delay = 0;
+	var name;
+	var type;
+	var queue = [];
+	var disable;
+
+	// storage 指定用
+	var data;
+	var fps;
+	
+	function CopyValueAction(target, elm) {
+		super.AbsoluteActionHandler(target, elm);
+		disable = elm.disable;
+		initValue = target.getValue();
+		delay = elm.delay;
+		name = elm.name !== void ? elm.name : typeof target.target.name == "String" ? target.target.name : "";
+		type = elm.type !== void ? elm.type : target.propName;
+
+		// csv ベースファイルの指定
+		if (elm.storage !== void) {
+			//dm(@"${name}:copyValueAction:ファイル読みコミ${elm.storage}");
+			data = [];
+			try {
+				data.load(elm.storage);
+				data = data.join(",").split(/,/);
+				for (var i = 0; i < data.count; i++) {
+					data[i] = +data[i].trim();
+				}
+				fps = elm.fps !== void ? +elm.fps : 60;
+			} catch (e) {
+				dm(@"${name}:copyValueAction:ファイル読み込み失敗${elm.storage}");
+				data = void;
+			}
+		}
+	}
+
+	function next() {
+		queue.clear();
+	}
+
+	function doAction(target, now, stopFlag) {
+		if (stopFlag) {
+			target.setValue(initValue);
+			return true; 
+		} else {
+			if (disable == "" || !sf[disable]) {
+				if (data !== void) {
+					var n = int(now * fps / 1000.0) - delay;
+					//dm(@"${name}:copyValueAction:ファイル指定:${now}:${n}/${data.count}");
+					if (n > 0) {
+						if (n < data.count) {
+							target.setValue(data[n]);
+						} else {
+							// 終了
+							target.setValue(initValue);
+							data = void;
+							return true;
+						}
+					}
+				} else if (typeof target.target.copyValue != "undefined") {
+					queue.push(target.target.copyValue(name, type));
+					if (queue.count > delay) {
+						var value = queue.shift();
+						if (value !== void) {
+							target.setValue(value);
+						} else {
+							target.setValue(initValue);
+						}
+					}
+				}
+			} else {
+				// 初期状態で固定
+				target.setValue(initValue);
+			}
+			return false;
+        }
+    }
+};
+
+
+/**
+ * Evalアクション
+ * プロパティに毎フレームevalした値の結果を反映するアクション
+ * exp 評価する式
+ */
+class EvalAction extends AbsoluteActionHandler {
+  var exp;
+
+  function EvalAction(target, elm) {
+    super.AbsoluteActionHandler(target, elm);
+    exp = elm.exp !== void ? elm.exp : "0";
+  }
+
+  function doAction(target, now, stopFlag) {
+    if (stopFlag) {
+      return true;
+    } else {
+      target.setValue(Scripts.eval(exp));
+      return false;
+    }
+  }
+};
+
+// ----------------------------------------------------------------
+// 旧版互換用機能
+// ----------------------------------------------------------------
+
+function LayerNormalZoomModule(elm) {
+	return %[ zoomx:%[ handler:"MoveAction", start:elm.start, value:elm.zoom, time:elm.time, delay:elm.delay, accel:elm.accel],
+			  zoomy:%[ handler:"MoveAction", start:elm.start, value:elm.zoom, time:elm.time, delay:elm.delay, accel:elm.accel]];
+}
+
+function LayerToRotateModule(elm) {
+    var rotate = elm.angle !== void ? elm.angle : elm.rotate;
+	return %[rotate:%[ handler:"MoveAction", start:elm.start, value:rotate, time:elm.time, delay:elm.delay, accel:elm.accel]];
+}
+
+function LayerFadeToModeModule(elm) {
+	return %[opacity:%[ handler:"MoveAction", start:elm.start, value:elm.opacity, time:elm.time, delay:elm.delay, accel:elm.accel]];
+}
+
+function LayerMoveModule(elm, accel) {
+	return %[xpos:%[ handler:"MoveAction", start:elm.startx, value:elm.x, time:elm.time, delay:elm.delay, accel:accel],
+			 ypos:%[ handler:"MoveAction", start:elm.starty, value:elm.y, time:elm.time, delay:elm.delay, accel:accel]];
+}
+
+function LayerNormalMoveModule(elm) {
+	return LayerMoveModule(elm, 0);
+}
+
+function LayerAccelMoveModule(elm) {
+	return LayerMoveModule(elm, 1);
+}
+
+function LayerDecelMoveModule(elm) {
+	return LayerMoveModule(elm, -1);
+}
+
+function LayerParabolaMoveModule(elm) {
+	return %[xpos:%[handler:"ParabolaMoveAction", x:elm.x, y:elm.y, toptime:elm.toptime],
+		 ypos:null];
+}
+
+function LayerVibrateActionModule(elm) {
+	return %[xpos:%[ handler:"RandomAction", vibration:elm.vibration/2, waittime:elm.waittime, time:elm.time, delay:elm.delay],
+			 ypos:%[ handler:"RandomAction", vibration:elm.vibration/2, waittime:elm.waittime, time:elm.time, delay:elm.delay]];
+}
+
+function LayerJumpActionModule(elm) {
+	return %[xpos:null,
+			 ypos:%[ handler:"SinAction", vibration:elm.vibration, cycle:elm.cycle, angvel:elm.angvel, time:elm.time, delay:elm.delay]];
+}
+
+function LayerJumpOnceActionModule(elm) {
+	return %[xpos:null,
+			 ypos:%[ handler:"SinAction", vibration:-elm.vibration, cycle:elm.cycle, angvel:elm.angvel, time:elm.cycle/2, delay:elm.delay]];
+}
+
+function LayerWaveActionModule(elm) {
+	return %[xpos:%[ handler:"SinAction", vibration:elm.vibration, cycle:elm.cycle, angvel:elm.angvel, time:elm.time, delay:elm.delay],
+			 ypos:null];
+}
+
+function LayerWaveOnceActionModule(elm) {
+	return %[xpos:%[ handler:"SinAction", vibration:-elm.vibration, cycle:elm.cycle, angvel:elm.angvel, time:elm.cycle/2, delay:elm.delay],
+			 ypos:null];
+}
+
+function LayerFallActionModule(elm) {
+    var time = elm.falltime !== void ? elm.falltime : elm.time;
+	return %[xpos:null,
+		 ypos:%[handler:"FallAction", distance:elm.distance, time:time, delay:elm.delay]];
+}
+
+function LayerVRotateZoomModule(elm) {
+	return %[zoomx:%[ handler:"SinAction", vibration:"@", offset:"-@", cycle:elm.time, angvel:elm.angvel, time:elm.time, delay:elm.delay],
+			 zoomy:null];
+}
+
+function LayerHRotateZoomModule(elm) {
+	return %[zoomy:%[ handler:"SinAction", vibration:"@", offset:"-@", cycle:elm.time, angvel:elm.angvel, time:elm.time, delay:elm.delay],
+			 zoomx:null];
+}
+
+function LayerHeartBeatZoomModule(elm) {
+	return %[zoomx:%[ handler:"SinAction", vibration:elm.zoom-100, cycle:elm.time*2, time:elm.time, delay:elm.delay],
+			 zoomy:%[ handler:"SinAction", vibration:elm.zoom-100, cycle:elm.time*2, time:elm.time, delay:elm.delay]];
+}
+
+function LayerVibrateZoomModule(elm) {
+	return %[zoomx:%[ handler:"RandomAction", vibration:elm.vibration/2, waittime:elm.waittime, time:elm.time, delay:elm.delay],
+			 zoomy:%[ handler:"RandomAction", vibration:elm.vibration/2, waittime:elm.waittime, time:elm.time, delay:elm.delay]];
+}
+
+function LayerNormalRotateModule(elm) {
+    var cycle = elm.angvel !== void ? 360/elm.angvel*1000 : elm.cycle;
+	return %[rotate:%[handler:"TriangleAction", vibration:360, ontime:cycle, offtime:0, time:elm.time, delay:elm.delay]];
+}
+
+function LayerVibrateRotateModule(elm) {
+	return %[rotate:%[ handler:"RandomAction", vibration:elm.vibration/2, waittime:elm.waittime, time:elm.time, delay:elm.delay]];
+}
+
+function LayerFalldownRotateModule(elm) {
+	return %[rotate:%[ handler:"MoveAction", value:"@+" + elm.angle, accel:1, time:elm.time, delay:elm.delay]];
+}
+
+function LayerBlinkModeModule(elm) {
+	return %[visible:%[handler:"SquareAction", vibration:0.5, ontime:elm.showtime, offtime:elm.hidetime, time:elm.time, delay:elm.delay, offset:0.5]];
+}
+
+function LayerFadeModeModule(elm) {
+	return %[opacity:%[handler:"TriangleAction", vibration:"@", offset:"-@", ontime:elm.intime, offtime:elm.outtime, time:elm.time, delay:elm.delay]];
+}
+
+function LayerQuakeActionModule(elm) {
+	var xvib, yvib;
+	xvib = yvib = elm.vibration;
+	xvib = elm.xvibration if (elm.xvibration !== void);
+	yvib = elm.yvibration if (elm.yvibration !== void);
+	var ret = %[];
+	ret.camerax = %[ handler:"RandomAction", vibration:xvib/2, waittime:elm.waittime, time:elm.time, delay:elm.delay] if (xvib != 0);
+	ret.cameray = %[ handler:"RandomAction", vibration:yvib/2, waittime:elm.waittime, time:elm.time, delay:elm.delay] if (yvib != 0);
+	return ret;
+}
+
+function copyActionParam(dst, src)
+{
+	Scripts.foreach(actionParams, function(name,value,dst,src) {
+		if (src[name] !== void) dst[name] = src[name];
+	}, dst, src);
+	return dst;
+}
+
+function replaceActionParam(action, params)
+{
+	var ret = %[];
+	Scripts.foreach(action, function(name, value, params, ret) {
+		var n = params[name];
+		if (n !== void) {
+			ret[n] = value;
+		} else {
+			ret[name] = value;
+		}
+	}, params, ret);
+	return ret;
+}
+
+/**
+ * ・旧スタイルアクションを新スタイルアクションに変換		将旧样式动作转换为新样式动作
+ * ・path 指定を PathMoveAction に展開		指定path则展开为	PathMoveAction
+ */
+function convertAction(action)
+{
+	// 文字列の場合は評価してしまう
+	if (typeof action == "String") {
+		action = Scripts.eval(action);
+	}
+	if (typeof action == "Object" && action instanceof "Dictionary") {
+		//dm("辞書アクション:" + action);
+		//showKeys("アクション", action);
+		// 辞書の場合
+
+		// パス指定がある場合は展開
+		if (action.path !== void) {
+			var e = %[];
+			(Dictionary.assign incontextof e)(action, false);
+			createMoveAction(e);
+			delete e.path;
+			delete e.spline;
+			action = e;
+		}
+		if (typeof action.module == "Object") {
+			//dm("モジュール直接指定");
+			throw new Exception("用法更改：请使用字符串指定操作名称:" + action.module);
+		} else if (typeof action.module == "String") {
+			//dm("モジュール名指定:" + action.module);
+			var module = Scripts.eval(action.module);	// 用module指定的方法直接生成字典
+			if (module !== void) {
+				var ret = module(action);
+				if (action.replace !== void) {
+					ret = replaceActionParam(ret, action.replace);
+				}
+				return copyActionParam(ret, action);	//	复制一些指定的参数
+			} else {
+				throw new Exception("アクションモジュールが存在しません:" + action.module);
+			}
+		} else if (typeof action.moduleName == "String") {
+			// moduleName が指定されている場合はアクション定義とみなす
+			//dm("モジュール名指定:" + action.moduleName);
+			var module = Scripts.eval(action.moduleName);
+			if (module !== void) {
+				var ret = module(action);
+				if (action.replace !== void) {
+					ret = replaceActionParam(ret, action.replace);
+				}
+				return copyActionParam(ret, action);
+			} else {
+				throw new Exception("アクションモジュールが存在しません:" + action.moduleName);
+			}
+		}
+	}
+	return action;
+}
+
+/**
+ * path
+ * パス指定の展開処理
+ */
+function createMoveAction(elm)
+{
+	// path の分解
+	var path = (typeof elm.path == "Object" && elm.path instanceof "Array") ? elm.path :  [].split("(), ", elm.path, , true);
+	
+	// 座標情報リスト
+	var xpos    = "";
+	var ypos    = "";
+	var opacity = "";
+
+	if (elm.spline !== void && +elm.spline) {
+
+		if (path.count < 6)	{
+			// 3 点以下 ( 指定するのはそのうちの2点 ) は補完できない
+			throw new Exception("2 点以上を指定してください");
+		}
+
+		var x = [0]; 
+		var y = [0];
+		var n = path.count;
+		for (var i=0;i<n;i+=3) {
+			if (i > 0) {
+				opacity += ",";
+			}
+			x.add(+path[i]);
+			y.add(+path[i+1]);
+			opacity += path[i+2];
+		}
+		
+		// スプライン補間に必要なワークを計算
+		var points = x.count;
+		var tmpx = [], tmpy = [];
+		var tx = [];
+		var ty = [];
+		tx[0] = 0;
+		ty[0] = 0;
+		tx[points-1] = 0;
+		ty[points-1] = 0;
+
+		for(var i = points-2, pi = x.count-2; i >= 0; i--, pi --)
+		{
+			tmpx[i+1] = (x[pi+1] - x[pi]);
+			tmpy[i+1] = (y[pi+1] - y[pi]);
+		}
+
+		tx[1] = tmpx[2] - tmpx[1] - tx[0];
+		ty[1] = tmpy[2] - tmpy[1] - ty[0];
+
+		tmpx[1] = 4;
+		tmpy[1] = 4;
+
+		var lim = points - 2;
+		for(var i = 1; i < lim; i++)
+		{
+			var x = 1 / tmpx[i];
+			var y = 1 / tmpy[i];
+			tx[i+1] = tmpx[i+2] - tmpx[i+1] - tmpx[i] * x;
+			ty[i+1] = tmpy[i+2] - tmpy[i+1] - tmpy[i] * y;
+			tmpx[i+1] = 4 - x;
+			tmpy[i+1] = 4 - y;
+		}
+
+		tx[points-2] -= tx[points-1];
+		ty[points-2] -= ty[points-1];
+
+		for(var i = points-2; i>0; i--)
+		{
+			tx[i] = (tx[i] - tx[i+1]) / tmpx[i];
+			ty[i] = (ty[i] - ty[i+1]) / tmpy[i];
+		}
+
+		// 10倍で補間
+		var l = (points-1) * 10;
+		for (var i=1;i<=l;i++) {
+			var index =  i \ 10;
+			var d = (i % 10) / 10;
+			var l = (((tx[index+1] - tx[index])*d +
+					  tx[index]*3)*d +
+					 ((x[index + 1] - x[index]) -
+					  (tx[index]*2 + tx[index+1]))) * d + x[index];
+			var t = (((ty[index+1] - ty[index])*d +
+					  ty[index]*3)*d +
+					 ((y[index + 1] - y[index]) -
+					  (ty[index]*2 + ty[index+1]))) * d + y[index];
+			if (i > 1) {
+				xpos += ",";
+				ypos += ",";
+			}
+			xpos += "@+"+(int)l;
+			ypos += "@+"+(int)t;
+		}
+
+	} else {
+		// 単純移動
+		var n = path.count;
+		for (var i=0;i<n;i+=3) {
+			if (i > 0) {
+				xpos += ",";
+				ypos += ",";
+				opacity += ",";
+			}
+			xpos += "@+"+path[i];
+			ypos += "@+"+path[i+1];
+			opacity += path[i+2];
+		}
+	}
+	// アクションとして組み直し
+	elm.xpos    = %[handler:"PathAction", value:xpos];
+	elm.ypos    = %[handler:"PathAction", value:ypos];
+	elm.opacity = %[handler:"PathAction", value:opacity];
+}
