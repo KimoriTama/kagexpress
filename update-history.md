@@ -253,7 +253,7 @@
  |time| 渐变时间|
 
 
-  ### fadevoice
+  ### waitvoice
 
 >  **描述：**
 
